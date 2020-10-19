@@ -9,8 +9,8 @@
 	get_poa_from_v2_index/1
 ]).
 
--include("ar.hrl").
--include("perpetual_storage.hrl").
+-include_lib("arweave/include/ar.hrl").
+-include_lib("arweave/include/perpetual_storage.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
 -define(MIN_MAX_OPTION_DEPTH, 100).
@@ -47,7 +47,7 @@ generate([{Seed, WeaveSize, _TXRoot} | _] = BI, Depth) ->
 	).
 
 generate(_, _, _, N, N) ->
-	ar:info([
+    ?LOG_INFO([
 		{event, no_data_for_poa},
 		{tried_options, N - 1}
 	]),
@@ -60,7 +60,7 @@ generate(Seed, WeaveSize, BI, Option, Limit) ->
 		not_found ->
 			generate(Seed, WeaveSize, BI, Option + 1, Limit);
 		SPoA ->
-			ar:info(
+			?LOG_INFO(
 				[
 					{event, generated_poa},
 					{weave_size, WeaveSize},
@@ -83,7 +83,7 @@ get_spoa(RecallByte, BI, Option) ->
 				B ->
 					case B#block.txs of
 						[] ->
-							ar:err([
+							?LOG_ERROR([
 								{event, empty_poa_challenge_block},
 								{hash, ar_util:encode(B#block.indep_hash)}
 							]),
@@ -142,7 +142,7 @@ construct_spoa(B, TXs, BlockOffset, TXRoot, Option) ->
 				{ok, POA} ->
 					case byte_size(POA#poa.data_path) > ?MAX_PATH_SIZE of
 						true ->
-							ar:info([
+							?LOG_INFO([
 								{event, data_path_size_exceeds_the_limit},
 								{block, ar_util:encode(B#block.indep_hash)},
 								{tx, ar_util:encode(TX#tx.id)},
@@ -152,7 +152,7 @@ construct_spoa(B, TXs, BlockOffset, TXRoot, Option) ->
 						false ->
 							case byte_size(POA#poa.tx_path) > ?MAX_PATH_SIZE of
 								true ->
-									ar:info([
+									?LOG_INFO([
 										{event, tx_path_size_exceeds_the_limit},
 										{block, ar_util:encode(B#block.indep_hash)},
 										{tx, ar_util:encode(TX#tx.id)},
@@ -164,21 +164,21 @@ construct_spoa(B, TXs, BlockOffset, TXRoot, Option) ->
 							end
 					end;
 				{error, invalid_data_root} ->
-					ar:warn([
+					?LOG_WARNING([
 						{event, invalid_data_root},
 						{block, ar_util:encode(B#block.indep_hash)},
 						{tx, ar_util:encode(TX#tx.id)}
 					]),
 					not_found;
 				{error, invalid_root} ->
-					ar:warn([
+					?LOG_WARNING([
 						{event, invalid_transaction_root},
 						{block, ar_util:encode(B#block.indep_hash)},
 						{tx, ar_util:encode(TX#tx.id)}
 					]),
 					not_found;
 				{error, invalid_tx_size} ->
-					ar:warn([
+					?LOG_WARNING([
 						{event, invalid_transaction_size},
 						{block, ar_util:encode(B#block.indep_hash)},
 						{tx, ar_util:encode(TX#tx.id)}

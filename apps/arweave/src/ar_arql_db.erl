@@ -1,7 +1,7 @@
 -module(ar_arql_db).
 -behaviour(gen_server).
 
--export([start_link/1]).
+-export([start_link/0]).
 -export([populate_db/1]).
 -export([select_tx_by_id/1, select_txs_by/1]).
 -export([select_block_by_tx_id/1, select_tags_by_tx_id/1]).
@@ -9,7 +9,8 @@
 -export([insert_full_block/1, insert_full_block/2, insert_block/1, insert_tx/2, insert_tx/3]).
 -export([init/1, handle_call/3, handle_cast/2, terminate/2]).
 
--include("ar.hrl").
+-include_lib("arweave/include/ar.hrl").
+-include_lib("arweave/include/ar_config.hrl").
 
 %% Duration after which to consider the query time unusually long.
 %% Set to 100ms.
@@ -107,8 +108,8 @@ DROP INDEX idx_tag_name_value;
 %%% Public API.
 %%%===================================================================
 
-start_link(Opts) ->
-	gen_server:start_link({local, ?MODULE}, ?MODULE, Opts, []).
+start_link() ->
+	gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 populate_db(BHL) ->
 	gen_server:cast(?MODULE, {populate_db, BHL}).
@@ -165,9 +166,10 @@ insert_tx(BH, TX, StoreTags) ->
 %%% Generic server callbacks.
 %%%===================================================================
 
-init(Opts) ->
-	{data_dir, DataDir} = proplists:lookup(data_dir, Opts),
-	ar:info([{ar_arql_db, init}, {data_dir, DataDir}]),
+init([]) ->
+	{ok, Config} = application:get_env(arweave, config),
+	DataDir = Config#config.data_dir,
+	?LOG_INFO([{ar_arql_db, init}, {data_dir, DataDir}]),
 	%% Very occasionally the port fails to be reopened immediately after
 	%% a crash so we give it a little time here.
 	timer:sleep(1000),
@@ -206,7 +208,7 @@ handle_call({select_tx_by_id, ID}, _, State) ->
 	ok = ar_sqlite3:reset(Stmt, ?DRIVER_TIMEOUT),
 	ok = case Time of
 		T when T > ?LONG_QUERY_TIME ->
-			ar:warn([
+			?LOG_WARNING([
 				{ar_arql_db, long_query},
 				{query_type, select_tx_by_id},
 				{microseconds, T},
@@ -234,7 +236,7 @@ handle_call({select_txs_by, Opts}, _, #{ conn := Conn } = State) ->
 	end),
 	ok = case Time of
 		T when T > ?LONG_QUERY_TIME ->
-			ar:warn([
+			?LOG_WARNING([
 				{ar_arql_db, long_query},
 				{query_type, select_txs_by},
 				{microseconds, T},
@@ -258,7 +260,7 @@ handle_call({select_block_by_tx_id, TXID}, _, State) ->
 	ar_sqlite3:reset(Stmt, ?DRIVER_TIMEOUT),
 	ok = case Time of
 		T when T > ?LONG_QUERY_TIME ->
-			ar:warn([
+			?LOG_WARNING([
 				{ar_arql_db, long_query},
 				{query_type, select_block_by_tx_id},
 				{microseconds, T},
@@ -280,7 +282,7 @@ handle_call({select_tags_by_tx_id, TXID}, _, State) ->
 	end),
 	ok = case Time of
 		T when T > ?LONG_QUERY_TIME ->
-			ar:warn([
+			?LOG_WARNING([
 				{ar_arql_db, long_query},
 				{query_type, select_tags_by_tx_id},
 				{microseconds, T},
@@ -312,7 +314,7 @@ handle_call({eval_legacy_arql, Query}, _, #{ conn := Conn } = State) ->
 	end),
 	ok = case Time of
 		T when T > ?LONG_QUERY_TIME ->
-			ar:warn([
+			?LOG_WARNING([
 				{ar_arql_db, long_query},
 				{query_type, eval_legacy_arql},
 				{microseconds, T},
@@ -360,7 +362,7 @@ handle_cast({insert_full_block, BlockFields, TxFieldsList, TagFieldsList}, State
 	end),
 	ok = case Time of
 		T when T > ?LONG_INSERT_TIME ->
-			ar:warn([
+			?LOG_WARNING([
 				{ar_arql_db, long_query},
 				{query_type, insert_full_block},
 				{microseconds, T},
@@ -386,7 +388,7 @@ handle_cast({insert_block, BlockFields}, State) ->
 	end),
 	ok = case Time of
 		T when T > ?LONG_INSERT_TIME ->
-			ar:warn([
+			?LOG_WARNING([
 				{ar_arql_db, long_query},
 				{query_type, insert_block},
 				{microseconds, T},
@@ -421,7 +423,7 @@ handle_cast({insert_tx, TXFields, TagFieldsList}, State) ->
 	end),
 	ok = case Time of
 		T when T > ?LONG_INSERT_TIME ->
-			ar:warn([
+			?LOG_WARNING([
 				{ar_arql_db, long_query},
 				{query_type, insert_tx},
 				{microseconds, T},
@@ -443,7 +445,7 @@ terminate(Reason, State) ->
 		select_block_by_tx_id_stmt := SelectBlockByTxIdStmt,
 		select_tags_by_tx_id_stmt := SelectTagsByTxIdStmt
 	} = State,
-	ar:info([{ar_arql_db, terminate}, {reason, Reason}]),
+	?LOG_INFO([{ar_arql_db, terminate}, {reason, Reason}]),
 	ar_sqlite3:finalize(InsertBlockStmt, ?DRIVER_TIMEOUT),
 	ar_sqlite3:finalize(InsertTxStmt, ?DRIVER_TIMEOUT),
 	ar_sqlite3:finalize(InsertTagStmt, ?DRIVER_TIMEOUT),
@@ -466,7 +468,7 @@ ensure_meta_table_created(Conn) ->
 	end.
 
 create_meta_table(Conn) ->
-	ar:info([{ar_arql_db, creating_meta_table}]),
+	?LOG_INFO([{ar_arql_db, creating_meta_table}]),
 	ok = ar_sqlite3:exec(Conn, ?CREATE_MIGRATION_TABLE_SQL, ?DRIVER_TIMEOUT),
 	ok.
 
@@ -480,7 +482,7 @@ ensure_schema_created(Conn) ->
 	end.
 
 create_schema(Conn) ->
-	ar:info([{ar_arql_db, creating_schema}]),
+	?LOG_INFO([{ar_arql_db, creating_schema}]),
 	ok = ar_sqlite3:exec(Conn, "BEGIN TRANSACTION", ?DRIVER_TIMEOUT),
 	ok = ar_sqlite3:exec(Conn, ?CREATE_TABLES_SQL, ?DRIVER_TIMEOUT),
 	ok = ar_sqlite3:exec(Conn, ?CREATE_INDEXES_SQL, ?DRIVER_TIMEOUT),
@@ -496,9 +498,9 @@ ensure_db_populated(BHL, #{ conn := Conn} = State) ->
 		{row, [1]} ->
 			ok;
 		done ->
-			ar:info([{ar_arql_db, populating_db}]),
+			?LOG_INFO([{ar_arql_db, populating_db}]),
 			{Time, ok} = timer:tc(fun() -> ok = do_populate_db(BHL, State) end),
-			ar:info([{ar_arql_db, populated_db}, {time, Time}]),
+			?LOG_INFO([{ar_arql_db, populated_db}, {time, Time}]),
 			ok
 	end.
 

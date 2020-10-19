@@ -1,7 +1,7 @@
 -module(ar_data_sync).
 -behaviour(gen_server).
 
--export([start_link/1]).
+-export([start_link/0]).
 -export([init/1, handle_cast/2, handle_call/3, handle_info/2]).
 -export([terminate/2]).
 
@@ -15,15 +15,15 @@
 	request_tx_data_removal/1
 ]).
 
--include("ar.hrl").
--include("ar_data_sync.hrl").
+-include_lib("arweave/include/ar.hrl").
+-include_lib("arweave/include/ar_data_sync.hrl").
 
 %%%===================================================================
 %%% Public interface.
 %%%===================================================================
 
-start_link(Args) ->
-	gen_server:start_link({local, ?MODULE}, ?MODULE, Args, []).
+start_link() ->
+	gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 %% @doc Notify the server the node has joined the network on the given block index.
 join(BI) ->
@@ -113,7 +113,7 @@ get_chunk(ChunksIndex, ChunkDataIndex, Offset) ->
 						not_found ->
 							{error, chunk_not_found};
 						{error, Reason} ->
-							ar:err([
+							?LOG_ERROR([
 								{event, failed_to_read_chunk},
 								{reason, Reason}
 							]),
@@ -158,7 +158,7 @@ get_tx_data(TXIndex, ChunksIndex, ChunkDataIndex, TXID) ->
 		not_found ->
 			{error, not_found};
 		{error, Reason} ->
-			ar:err([{event, failed_to_get_tx_data}, {reason, Reason}]),
+			?LOG_ERROR([{event, failed_to_get_tx_data}, {reason, Reason}]),
 			{error, failed_to_get_tx_data};
 		{ok, Value} ->
 			{Offset, Size} = binary_to_term(Value),
@@ -170,7 +170,7 @@ get_tx_data(TXIndex, ChunksIndex, ChunkDataIndex, TXID) ->
 					EndKey = << Offset:?OFFSET_KEY_BITSIZE >>,
 					case ar_kv:get_range(ChunksIndex, StartKey, EndKey) of
 						{error, Reason} ->
-							ar:err([
+							?LOG_ERROR([
 								{event, failed_to_get_chunks_for_tx_data},
 								{reason, Reason}
 							]),
@@ -199,7 +199,7 @@ get_tx_offset(TXIndex, TXID) ->
 		not_found ->
 			{error, not_found};
 		{error, Reason} ->
-			ar:err([{event, failed_to_read_tx_offset}, {reason, Reason}]),
+			?LOG_ERROR([{event, failed_to_read_tx_offset}, {reason, Reason}]),
 			{error, failed_to_read_offset}
 	end.
 
@@ -236,7 +236,7 @@ request_tx_data_removal(TXID) ->
 %%%===================================================================
 
 init([]) ->
-	ar:info([{event, ar_data_sync_start}]),
+	?LOG_INFO([{event, ar_data_sync_start}]),
 	process_flag(trap_exit, true),
 	State = init_kv(),
 	{SyncRecord, CurrentBI, DiskPoolDataRoots, DiskPoolSize, WeaveSize, CompactedSize} =
@@ -471,35 +471,35 @@ handle_cast(check_space_update_peer_sync_records, State) ->
 	{noreply, State};
 
 handle_cast(update_peer_sync_records, State) ->
-	case whereis(http_bridge_node) of
+	case whereis(ar_bridge) of
 		undefined ->
-			timer:apply_after(200, gen_server, cast, [self(), update_peer_sync_records]);
-		Bridge ->
-			Peers = ar_bridge:get_remote_peers(Bridge),
-			BestPeers = pick_random_peers(
-				Peers,
-				?CONSULT_PEER_RECORDS_COUNT,
-				?PICK_PEERS_OUT_OF_RANDOM_N
-			),
-			Self = self(),
-			spawn(
-				fun() ->
-					PeerSyncRecords = lists:foldl(
-						fun(Peer, Acc) ->
-							case ar_http_iface_client:get_sync_record(Peer) of
-								{ok, SyncRecord} ->
-									maps:put(Peer, SyncRecord, Acc);
-								_ ->
-									Acc
-							end
-						end,
-						#{},
-						BestPeers
-					),
-					gen_server:cast(Self, {update_peer_sync_records, PeerSyncRecords})
-				end
-			)
-	end,
+			timer:apply_after(500, gen_server, cast, [self(), update_peer_sync_records]);
+		_ ->
+	        Peers = ar_bridge:get_remote_peers(),
+	        BestPeers = pick_random_peers(
+	        	Peers,
+	        	?CONSULT_PEER_RECORDS_COUNT,
+	        	?PICK_PEERS_OUT_OF_RANDOM_N
+	        ),
+	        Self = self(),
+	        spawn(
+	        	fun() ->
+	        		PeerSyncRecords = lists:foldl(
+	        			fun(Peer, Acc) ->
+	        				case ar_http_iface_client:get_sync_record(Peer) of
+	        					{ok, SyncRecord} ->
+	        						maps:put(Peer, SyncRecord, Acc);
+	        					_ ->
+	        						Acc
+	        				end
+	        			end,
+	        			#{},
+	        			BestPeers
+	        		),
+	        		gen_server:cast(Self, {update_peer_sync_records, PeerSyncRecords})
+	        	end
+	        )
+    end,
 	{noreply, State};
 
 handle_cast({update_peer_sync_records, PeerSyncRecords}, State) ->
@@ -522,7 +522,7 @@ handle_cast(check_space_sync_random_interval, State) ->
 			Msg =
 				"The node has stopped syncing data - the available disk space is"
 				" less than ~s. Add more disk space if you wish to store more data.",
-			ar:console(Msg, [ar_util:bytes_to_mb_string(?DISK_DATA_BUFFER_SIZE)]),
+			?LOG_INFO(Msg, [ar_util:bytes_to_mb_string(?DISK_DATA_BUFFER_SIZE)]),
 			cast_after(?DISK_SPACE_CHECK_FREQUENCY_MS, check_space_sync_random_interval)
 	end,
 	{noreply, State};
@@ -891,13 +891,13 @@ handle_cast({remove_tx_data, TXID}, State) ->
 			gen_server:cast(?MODULE, {remove_tx_data, TXID, End, Start + 1}),
 			{noreply, State};
 		not_found ->
-			ar:err([
+			?LOG_ERROR([
 				{event, blacklisted_tx_offset_not_found},
 				{tx, ar_util:encode(TXID)}
 			]),
 			{noreply, State};
 		{error, Reason} ->
-			ar:err([
+			?LOG_ERROR([
 				{event, failed_to_fetch_blacklisted_tx_offset},
 				{tx, ar_util:encode(TXID)},
 				{reason, Reason}
@@ -950,7 +950,7 @@ handle_call(
 				{ok, UpdatedState} ->
 					{reply, ok, UpdatedState};
 				{{error, Reason}, MaybeUpdatedState} ->
-					ar:err([{event, ar_data_sync_failed_to_store_chunk}, {reason, Reason}]),
+					?LOG_ERROR([{event, ar_data_sync_failed_to_store_chunk}, {reason, Reason}]),
 					{reply, {error, Reason}, MaybeUpdatedState}
 			end
 	end;
@@ -968,8 +968,8 @@ handle_info(_Message, State) ->
 
 terminate(Reason, State) ->
 	#sync_data_state{ chunks_index = {DB, _} } = State,
-	ar:info([{event, ar_data_sync_terminate}, {reason, Reason}]),
 	ok = store_sync_state(State),
+	?LOG_INFO([{event, ar_data_sync_terminate}, {reason, Reason}]),
 	ar_kv:close(DB).
 
 %%%===================================================================
@@ -1305,11 +1305,11 @@ update_tx_index(TXIndex, TXOffsetIndex, SizeTaggedTXs, BlockStartOffset) ->
 							ok ->
 								TXEndOffset;
 							{error, Reason} ->
-								ar:err([{event, failed_to_update_tx_index}, {reason, Reason}]),
+								?LOG_ERROR([{event, failed_to_update_tx_index}, {reason, Reason}]),
 								TXEndOffset
 						end;
 					{error, Reason} ->
-						ar:err([{event, failed_to_update_tx_offset_index}, {reason, Reason}]),
+						?LOG_ERROR([{event, failed_to_update_tx_offset_index}, {reason, Reason}]),
 						TXEndOffset
 				end
 		end,
@@ -1532,7 +1532,7 @@ update_chunks_index(
 				end,
 			{updated, SyncRecord2, CompactedSize2};
 		{error, Reason} ->
-			ar:err([
+			?LOG_ERROR([
 				{event, failed_to_update_chunk_index},
 				{reason, Reason},
 				{data_path_hash, ar_util:encode(DataPathHash)},
@@ -1919,7 +1919,7 @@ get_tx_data_from_chunks(ChunkDataIndex, Offset, Size, Map, Data) ->
 				not_found ->
 					{error, not_found};
 				{error, Reason} ->
-					ar:err([{event, failed_to_read_chunk_for_tx_data}, {reason, Reason}]),
+					?LOG_ERROR([{event, failed_to_read_chunk_for_tx_data}, {reason, Reason}]),
 					{error, not_found};
 				{ok, {Chunk, _}} ->
 					get_tx_data_from_chunks(
