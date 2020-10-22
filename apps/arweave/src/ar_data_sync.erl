@@ -8,7 +8,7 @@
 -export([
 	join/1,
 	add_tip_block/2, add_block/2,
-	add_chunk/1, add_chunk/2,
+	add_chunk/1, add_chunk/2, add_chunk/3,
 	add_data_root_to_disk_pool/3, maybe_drop_data_root_from_disk_pool/3,
 	get_chunk/1, get_tx_root/1, get_tx_data/1, get_tx_offset/1,
 	get_sync_record_etf/0, get_sync_record_json/0
@@ -31,7 +31,11 @@ add_tip_block(BlockTXPairs, RecentBI) ->
 	gen_server:cast(?MODULE, {add_tip_block, BlockTXPairs, RecentBI}).
 
 add_chunk(Proof) ->
-	add_chunk(Proof, 5000).
+	add_chunk(Proof, 5000, do_not_write_to_free_space_buffer).
+
+%% @doc Store the given chunk if the proof is valid.
+add_chunk(Proof, Timeout) ->
+	add_chunk(Proof, Timeout, do_not_write_to_free_space_buffer).
 
 add_chunk(
 	#{
@@ -41,9 +45,10 @@ add_chunk(
 		chunk := Chunk,
 		data_size := TXSize
 	},
-	Timeout
+	Timeout,
+	WriteToFreeSpaceBuffer
 ) ->
-	gen_server:call(?MODULE, {add_chunk, DataRoot, DataPath, Chunk, Offset, TXSize}, Timeout).
+	gen_server:call(?MODULE, {add_chunk, DataRoot, DataPath, Chunk, Offset, TXSize, WriteToFreeSpaceBuffer}, Timeout).
 
 add_data_root_to_disk_pool(<<>>, _, _) ->
 	ok;
@@ -151,9 +156,9 @@ init([]) ->
 		missing_data_cursor = first,
 		compacted_size = CompactedSize
 	},
-	gen_server:cast(self(), update_peer_sync_records),
-	gen_server:cast(self(), {sync_random_interval, []}),
-	gen_server:cast(self(), compact_intervals),
+	gen_server:cast(self(), check_space_update_peer_sync_records),
+	gen_server:cast(self(), check_space_sync_random_interval),
+	gen_server:cast(self(), check_space_compact_intervals),
 	gen_server:cast(self(), update_disk_pool_data_roots),
 	gen_server:cast(self(), process_disk_pool_item),
 	{ok, State2}.
@@ -290,6 +295,15 @@ handle_cast({add_block, B, SizeTaggedTXs}, State) ->
 	add_block(B, SizeTaggedTXs, State),
 	{noreply, State};
 
+handle_cast(check_space_update_peer_sync_records, State) ->
+	case have_free_space() of
+		true ->
+			gen_server:cast(self(), update_peer_sync_records);
+		false ->
+			cast_after(?DISK_SPACE_CHECK_FREQUENCY_MS, check_space_update_peer_sync_records)
+	end,
+	{noreply, State};
+
 handle_cast(update_peer_sync_records, State) ->
 	case whereis(http_bridge_node) of
 		undefined ->
@@ -327,11 +341,25 @@ handle_cast({update_peer_sync_records, PeerSyncRecords}, State) ->
 		?PEER_SYNC_RECORDS_FREQUENCY_MS,
 		gen_server,
 		cast,
-		[self(), update_peer_sync_records]
+		[self(), check_space_update_peer_sync_records]
 	),
 	{noreply, State#sync_data_state{
 		peer_sync_records = PeerSyncRecords
 	}};
+
+handle_cast(check_space_sync_random_interval, State) ->
+	FreeSpace = ar_storage:get_free_space(),
+	case FreeSpace > ?DISK_DATA_BUFFER_SIZE of
+		true ->
+			gen_server:cast(self(), {sync_random_interval, []});
+		false ->
+			Msg =
+				"The node has stopped syncing data - the available disk space is"
+				" less than ~s. Add more disk space if you wish to store more data.",
+			ar:console(Msg, [ar_util:bytes_to_mb_string(?DISK_DATA_BUFFER_SIZE)]),
+			cast_after(?DISK_SPACE_CHECK_FREQUENCY_MS, check_space_sync_random_interval)
+	end,
+	{noreply, State};
 
 %% Pick a random not synced interval and sync it.
 handle_cast({sync_random_interval, RecentlyFailedPeers}, State) ->
@@ -352,7 +380,7 @@ handle_cast({sync_random_interval, RecentlyFailedPeers}, State) ->
 						?SCAN_MISSING_CHUNKS_INDEX_FREQUENCY_MS,
 						gen_server,
 						cast,
-						[self(), {sync_random_interval, []}]
+						[self(), check_space_sync_random_interval]
 					),
 					{noreply, State#sync_data_state{ missing_data_cursor = first }};
 				{ok, Key, Value, _NextCursor} ->
@@ -403,7 +431,7 @@ handle_cast({sync_random_interval, RecentlyFailedPeers}, State) ->
 										?SCAN_MISSING_CHUNKS_INDEX_FREQUENCY_MS,
 										gen_server,
 										cast,
-										[self(), sync_random_interval]
+										[self(), check_space_sync_random_interval]
 									);
 								{ok, Peer} ->
 									%% Sync one chunk.
@@ -431,6 +459,15 @@ handle_cast({sync_random_interval, RecentlyFailedPeers}, State) ->
 			gen_server:cast(self(), {sync_chunk, Peer, LeftBound, Byte, Byte, RightBound}),
 			{noreply, State#sync_data_state{ peer_sync_records = FilteredPeerSyncRecords }}
 	end;
+
+handle_cast(check_space_compact_intervals, State) ->
+	case have_free_space() of
+		true ->
+			gen_server:cast(self(), compact_intervals);
+		false ->
+			cast_after(?DISK_SPACE_CHECK_FREQUENCY_MS, check_space_compact_intervals)
+	end,
+	{noreply, State};
 
 %% Keep the number of intervals below ?MAX_SHARED_SYNCED_INTERVALS_COUNT,
 %% possibly introducing false positives. Over time, the number of intervals that
@@ -480,7 +517,7 @@ handle_cast(compact_intervals, State) ->
 
 handle_cast({sync_chunk, _, LeftBound, LByte, RByte, RightBound}, State)
 		when RByte >= RightBound andalso LByte < LeftBound ->
-	gen_server:cast(self(), sync_random_interval),
+	gen_server:cast(self(), check_space_sync_random_interval),
 	record_v2_index_data_size(State),
 	{noreply, State};
 handle_cast({sync_chunk, Peer, LeftBound, LByte, RByte, RightBound}, State) ->
@@ -708,13 +745,20 @@ handle_call({get_tx_offset, TXID}, _From, State) ->
 			{reply, {error, failed_to_read_offset}, State}
 	end;
 
-handle_call({add_chunk, DataRoot, DataPath, Chunk, Offset, TXSize}, _From, State) ->
-	case add_chunk(State, DataRoot, DataPath, Chunk, Offset, TXSize) of
-		{ok, UpdatedState} ->
-			{reply, ok, UpdatedState};
-		{{error, Reason}, MaybeUpdatedState} ->
-			ar:err([{event, ar_data_sync_failed_to_store_chunk}, {reason, Reason}]),
-			{reply, {error, Reason}, MaybeUpdatedState}
+handle_call(
+	{add_chunk, DataRoot, DataPath, Chunk, Offset, TXSize, WriteToFreeSpaceBuffer}, _From, State
+) ->
+	case WriteToFreeSpaceBuffer == write_to_free_space_buffer orelse have_free_space() of
+		false ->
+			{reply, {error, disk_full}, State};
+		true ->
+			case add_chunk(State, DataRoot, DataPath, Chunk, Offset, TXSize) of
+				{ok, UpdatedState} ->
+					{reply, ok, UpdatedState};
+				{{error, Reason}, MaybeUpdatedState} ->
+					ar:err([{event, ar_data_sync_failed_to_store_chunk}, {reason, Reason}]),
+					{reply, {error, Reason}, MaybeUpdatedState}
+			end
 	end;
 
 handle_call(get_sync_record_etf, _From, #sync_data_state{ sync_record = SyncRecord } = State) ->
@@ -970,6 +1014,9 @@ remove_orphaned_data_root_offsets(State, BlockStartOffset, WeaveSize) ->
 		<< BlockStartOffset:?OFFSET_KEY_BITSIZE >>,
 		<< (WeaveSize + 1):?OFFSET_KEY_BITSIZE >>
 	).
+
+have_free_space() ->
+	ar_storage:get_free_space() > ?DISK_DATA_BUFFER_SIZE.
 
 add_block(B, SizeTaggedTXs, State) ->
 	#sync_data_state{
@@ -1504,6 +1551,9 @@ pick_missing_blocks([{H, WeaveSize, _} | CurrentBI], BlockTXPairs) ->
 		_ ->
 			{WeaveSize, lists:reverse(After)}
 	end.
+
+cast_after(Delay, Message) ->
+	timer:apply_after(Delay, gen_server, cast, [self(), Message]).
 
 process_disk_pool_item(State, Key, Value, NextCursor) ->
 	#sync_data_state{
