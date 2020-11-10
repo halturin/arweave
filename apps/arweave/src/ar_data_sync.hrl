@@ -97,6 +97,9 @@
 -define(IS_CHUNK_PROOF_RATIO_NOT_ATTRACTIVE(Chunk, DataPath),
 	byte_size(DataPath) == 0 orelse byte_size(DataPath) > byte_size(Chunk)).
 
+%% @doc Time to wait before retrying a failed migration step.
+-define(MIGRATION_RETRY_DELAY_MS, 10000).
+
 %% @doc The state of the server managing data synchronization.
 -record(sync_data_state, {
 	%% @doc A set of non-overlapping intervals of global byte offsets ((end, start))
@@ -214,5 +217,14 @@
 	%% in the storage, we go back to the first one. Not stored.
 	missing_data_cursor,
 	%% @doc The total size of compacted intervals in the sync record (false positives).
-	compacted_size
+	compacted_size,
+	%% @doc A reference to the on-disk key value storage mapping SHA256 hashes of the
+	%% data paths of the chunks to their data. The motivation to not store chunk data directly
+	%% in the chunks_index is to save the space by not storing identical chunks placed under
+	%% different offsets several time and to be able to quickly move chunks from the disk pool
+	%% to the on-chain storage.
+	chunk_data_index,
+    %% @doc A reference to the on-disk key value storage mapping migration names to their
+    %% stages.
+    migrations_index
 }).
