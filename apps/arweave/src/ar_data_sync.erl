@@ -932,6 +932,7 @@ handle_cast({remove_tx_data, TXID, End, Cursor}, State) ->
 							sync_record = SyncRecord2
 						},
 					gen_server:cast(?MODULE, {remove_tx_data, TXID, End, ChunkEnd + 1}),
+					ar_meta_db:increase(used_space, -ChunkSize),
 					{noreply, State2}
 			end;
 		_ ->
