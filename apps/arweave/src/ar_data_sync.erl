@@ -1010,7 +1010,13 @@ init_kv() ->
 		{bloom_filter_policy, 10}, % ~1% false positive probability
 		{prefix_extractor, {capped_prefix_transform, 28}},
 		{optimize_filters_for_hits, true},
-		{max_open_files, 100000}
+		{max_open_files, 100000},
+		%% 640 MiB per SST file. RocksDB opens every SST file on startup and keeps
+		%% them open.
+		{target_file_size_base, 64 * 10 * 1024 * 1024},
+		%% The tuning guide recommends to set it to 10 times target_file_size_base.
+		%% https://github.com/facebook/rocksdb/wiki/RocksDB-Tuning-Guide.
+		{max_bytes_for_level_base, 64 * 10 * 10 * 1024 * 1024}
 	],
 	ColumnFamilies = [
 		"default",
