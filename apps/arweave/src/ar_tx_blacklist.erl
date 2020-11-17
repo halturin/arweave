@@ -28,6 +28,10 @@
 -define(REFRESH_BLACKLISTS_FREQUENCY_MS, 60 * 60 * 1000).
 -endif.
 
+%% @doc How long to wait before retrying to compose a blacklist from local and external
+%% sources after a failed attempt.
+-define(REFRESH_BLACKLISTS_RETRY_DELAY_MS, 10000).
+
 %% @doc How long to wait for the response to the previously requested
 %% header or data removal (takedown) before requesting it for a new tx.
 %% @end
@@ -102,71 +106,12 @@ init([]) ->
 	process_flag(trap_exit, true),
 	gen_server:cast(?MODULE, refresh_blacklist),
 	gen_server:cast(?MODULE, maybe_request_takedown),
+	gen_server:cast(?MODULE, maybe_restore_offsets),
 	{ok, _} = timer:apply_interval(?STORE_STATE_FREQUENCY_MS, ?MODULE, store_state, []),
-    {ok, #ar_tx_blacklist_state{}}.
+	{ok, #ar_tx_blacklist_state{}}.
 
 handle_cast(refresh_blacklist, State) ->
-	WhitelistFiles = ar_meta_db:get(transaction_whitelist_files),
-	WhiteSet = load_from_files(WhitelistFiles),
-	Files = ar_meta_db:get(transaction_blacklist_files),
-	Set2 = load_from_files(Files),
-	URLs = ar_meta_db:get(transaction_blacklist_urls),
-	Set3 = sets:subtract(sets:union(Set2, load_from_urls(URLs)), WhiteSet),
-	WhitelistURLs = ar_meta_db:get(transaction_whitelist_urls),
-	WhiteSet2 = sets:union(WhiteSet, load_from_urls(WhitelistURLs)),
-	Restored =
-		ets:foldl(
-			fun({TXID}, Acc) ->
-				case sets:is_element(TXID, WhiteSet2) of
-					true ->
-						[TXID | Acc];
-					false ->
-						Acc
-				end
-			end,
-			[],
-			ar_tx_blacklist
-		),
-	ok =
-		sets:fold(
-			fun(TXID, ok) ->
-				case ets:member(ar_tx_blacklist, TXID) of
-					false ->
-						ets:insert(ar_tx_blacklist_pending_headers, [{TXID}]),
-						ets:insert(ar_tx_blacklist_pending_data, [{TXID}]),
-						ok;
-					true ->
-						ok
-				end
-			end,
-			ok,
-			Set3
-		),
-	gen_server:cast(?MODULE, {update_restored_offsets, Restored}),
-	timer:apply_after(
-		?REFRESH_BLACKLISTS_FREQUENCY_MS,
-		gen_server,
-		cast,
-		[self(), refresh_blacklist]
-	),
-	{noreply, State};
-
-handle_cast({update_restored_offsets, []}, State) ->
-	{noreply, State};
-handle_cast({update_restored_offsets, [TXID | List]}, State) ->
-	case ar_data_sync:get_tx_offset(TXID) of
-		{ok, {End, Size}} ->
-			restore_offsets(End, End - Size);
-		{error, not_joined} ->
-			ok;
-		{error, Reason} ->
-			ar:err([
-				{event, ar_tx_blacklist_failed_to_fetch_tx_offset},
-				{tx, ar_util:encode(TXID)},
-				{reason, Reason}
-			])
-	end,
-	gen_server:cast(?MODULE, {update_restored_offsets, List}),
+	refresh_blacklist(),
 	{noreply, State};
 
 handle_cast(maybe_request_takedown, State) ->
@@ -196,6 +141,33 @@ handle_cast(maybe_request_takedown, State) ->
 		[self(), maybe_request_takedown]
 	),
 	{noreply, State3};
+
+handle_cast(maybe_restore_offsets, State) ->
+	case ets:first(ar_tx_blacklist_pending_restored_offsets) of
+		'$end_of_table' ->
+			ok;
+		TXID ->
+			case ar_data_sync:get_tx_offset(TXID) of
+				{ok, {End, Size}} ->
+					restore_offsets(End, End - Size),
+					ets:delete(ar_tx_blacklist_pending_restored_offsets, TXID);
+				{error, not_joined} ->
+					ok;
+				{error, Reason} ->
+					ar:err([
+						{event, ar_tx_blacklist_failed_to_fetch_tx_offset},
+						{tx, ar_util:encode(TXID)},
+						{reason, Reason}
+					])
+			end
+	end,
+	timer:apply_after(
+		?CHECK_PENDING_ITEMS_INTERVAL_MS,
+		gen_server,
+		cast,
+		[self(), maybe_restore_offsets]
+	),
+	{noreply, State};
 
 handle_cast({removed_tx, TXID}, State) ->
 	case ets:member(ar_tx_blacklist_pending_headers, TXID) of
@@ -247,7 +219,8 @@ initialize_state() ->
 		ar_tx_blacklist,
 		ar_tx_blacklist_pending_headers,
 		ar_tx_blacklist_pending_data,
-		ar_tx_blacklist_offsets
+		ar_tx_blacklist_offsets,
+		ar_tx_blacklist_pending_restored_offsets
 	],
 	lists:foreach(
 		fun
@@ -258,8 +231,122 @@ initialize_state() ->
 		Names
 	).
 
+refresh_blacklist() ->
+	WhitelistFiles = ar_meta_db:get(transaction_whitelist_files),
+	case load_from_files(WhitelistFiles) of
+		error ->
+			timer:apply_after(
+				?REFRESH_BLACKLISTS_RETRY_DELAY_MS,
+				gen_server,
+				cast,
+				[self(), refresh_blacklist]
+			),
+			ok;
+		{ok, Whitelist} ->
+			WhitelistURLs = ar_meta_db:get(transaction_whitelist_urls),
+			case load_from_urls(WhitelistURLs) of
+				error ->
+					timer:apply_after(
+						?REFRESH_BLACKLISTS_RETRY_DELAY_MS,
+						gen_server,
+						cast,
+						[self(), refresh_blacklist]
+					),
+					ok;
+				{ok, Whitelist2} ->
+					refresh_blacklist(sets:union(Whitelist, Whitelist2))
+			end
+	end.
+
+refresh_blacklist(Whitelist) ->
+	BlacklistFiles = ar_meta_db:get(transaction_blacklist_files),
+	case load_from_files(BlacklistFiles) of
+		error ->
+			timer:apply_after(
+				?REFRESH_BLACKLISTS_RETRY_DELAY_MS,
+				gen_server,
+				cast,
+				[self(), refresh_blacklist]
+			),
+			ok;
+		{ok, Blacklist} ->
+			BlacklistURLs = ar_meta_db:get(transaction_blacklist_urls),
+			case load_from_urls(BlacklistURLs) of
+				error ->
+					timer:apply_after(
+						?REFRESH_BLACKLISTS_RETRY_DELAY_MS,
+						gen_server,
+						cast,
+						[self(), refresh_blacklist]
+					),
+					ok;
+				{ok, Blacklist2} ->
+					refresh_blacklist(Whitelist, sets:union(Blacklist, Blacklist2))
+			end
+	end.
+
+refresh_blacklist(Whitelist, Blacklist) ->
+	Removed =
+		sets:fold(
+			fun(TXID, Acc) ->
+				case not sets:is_element(TXID, Whitelist)
+						andalso not ets:member(ar_tx_blacklist, TXID) of
+					true ->
+						[TXID | Acc];
+					false ->
+						Acc
+				end
+			end,
+			[],
+			Blacklist
+		),
+	Restored =
+		ets:foldl(
+			fun({TXID}, Acc) ->
+				case sets:is_element(TXID, Whitelist)
+						orelse not sets:is_element(TXID, Blacklist) of
+					true ->
+						[TXID | Acc];
+					false ->
+						Acc
+				end
+			end,
+			[],
+			ar_tx_blacklist
+		),
+	lists:foreach(
+		fun(TXID) ->
+			ets:insert(ar_tx_blacklist_pending_headers, [{TXID}]),
+			ets:insert(ar_tx_blacklist_pending_data, [{TXID}]),
+			ets:delete(ar_tx_blacklist_pending_restored_offsets, TXID)
+		end,
+		Removed
+	),
+	lists:foreach(
+		fun(TXID) ->
+			ets:insert(ar_tx_blacklist_pending_restored_offsets, [{TXID}]),
+			ets:delete(ar_tx_blacklist_pending_data, TXID),
+			ets:delete(ar_tx_blacklist_pending_headers, TXID),
+			ets:delete(ar_tx_blacklist, TXID)
+		end,
+		Restored
+	),
+	timer:apply_after(
+		?REFRESH_BLACKLISTS_FREQUENCY_MS,
+		gen_server,
+		cast,
+		[self(), refresh_blacklist]
+	),
+	ok.
+
 load_from_files(Files) ->
-	sets:from_list(lists:flatten(lists:map(fun load_from_file/1, Files))).
+	Lists = lists:map(fun load_from_file/1, Files),
+	case lists:all(fun(error) -> false; (_) -> true end, Lists) of
+		true ->
+			{ok, sets:from_list(lists:flatten(Lists))};
+		false ->
+			error
+	end.
 
 load_from_file(File) ->
 	try
@@ -272,7 +359,7 @@ load_from_file(File) ->
 			{exception, {Type, Pattern}}
 		],
 		ar:console(Warning),
-		[]
+		error
 	end.
 
 parse_binary(Binary) ->
@@ -294,7 +381,13 @@ parse_binary(Binary) ->
 	).
 
 load_from_urls(URLs) ->
-	sets:from_list(lists:flatten(lists:map(fun load_from_url/1, URLs))).
+	Lists = lists:map(fun load_from_url/1, URLs),
+	case lists:all(fun(error) -> false; (_) -> true end, Lists) of
+		true ->
+			{ok, sets:from_list(lists:flatten(Lists))};
+		false ->
+			error
+	end.
 
 load_from_url(URL) ->
 	try
@@ -318,7 +411,7 @@ load_from_url(URL) ->
 					{url, URL},
 					{reply, Reply}
 				]),
-				[]
+				error
 		end
 	catch Type:Pattern ->
 		ar:console([
@@ -326,7 +419,7 @@ load_from_url(URL) ->
 			{url, URL},
 			{exception, {Type, Pattern}}
 		]),
-		[]
+		error
 	end.
 
 request_header_takedown(State) ->
@@ -364,7 +457,8 @@ store_state() ->
 		ar_tx_blacklist,
 		ar_tx_blacklist_pending_headers,
 		ar_tx_blacklist_pending_data,
-		ar_tx_blacklist_offsets
+		ar_tx_blacklist_offsets,
+		ar_tx_blacklist_pending_restored_offsets
 	],
 	lists:foreach(
 		fun
@@ -437,7 +531,8 @@ close_dets() ->
 		ar_tx_blacklist,
 		ar_tx_blacklist_pending_headers,
 		ar_tx_blacklist_pending_data,
-		ar_tx_blacklist_offsets
+		ar_tx_blacklist_offsets,
+		ar_tx_blacklist_pending_restored_offsets
 	],
 	lists:foreach(
 		fun

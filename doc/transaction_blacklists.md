@@ -37,13 +37,17 @@ same format the blacklist files use.
 
 ## Update Content Policy On The Fly
 
-You can add a new entry to one of your transaction blacklists and the miner will automatically pick up the changes. The blacklisted identifiers are re-fetched from local files and remote endpoints every hour.
+If blacklisted transactions are removed from the provided files or stop being served by the
+specified endpoints, they are automatically un-blacklisted. Added transactions are picked
+up automatically too. However, the changes may not take effect immediately as it takes time
+until the node refreshes the list and applies the changes.
 
 If you wish to add more files or remote endpoints, restart the miner with the additional command argument(s) or config parameter(s) specifying the file(s).
 
-The blacklist is persisted on disk. If you restart the node without specifying any files or URLs,
-the previously constructed blacklist will take effect. If you want to reset the blacklist,
-stop the miner, erase the `ar_tx_blacklist` folder in the data directory, and start the miner.
+If you restart the node without any of the previously specified files or endpoints, the unique
+transactions fetched from them will be un-blacklisted.
+
+## Whitelisting Transactions
 
 If you want to whitelist particular transactions, put them into one or more files in the same format
 used in blacklist files and specify them on startup via the `transaction_whitelist` command argument
@@ -51,8 +55,10 @@ or via the `transaction_whitelists` field in the configuration file. Also, the n
 whitelists from remote endpoints specified via `transaction_whitelist_url` command arguments or
 `transaction_whitelist_urls` config field.
 
-The whitelist is not persisted so if you restart the node without specifying any whitelists, the
-previously whitelisted transactions can be blacklisted again.
+If a transaction is both in blacklist and whitelist, it is whitelisted.
+
+If you restart the node without specifying any whitelists, the previously whitelisted transactions
+can be blacklisted.
 
 ## Clean Up Old Data
 

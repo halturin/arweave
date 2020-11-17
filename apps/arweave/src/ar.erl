@@ -132,7 +132,7 @@ show_help() ->
 											 "One Base64 encoded transaction ID per line. "
 											 "If a transaction is in both lists, it is "
 											 "considered whitelisted."},
-            {"transaction_whitelist_url", "An HTTP endpoint serving a transaction whitelist."},
+			{"transaction_whitelist_url", "An HTTP endpoint serving a transaction whitelist."},
 			{"disk_space (num)", "Max size (in GB) for the disk partition containing the Arweave data directory (blocks, txs, etc) when the miner stops writing files to disk."},
 			{"init", "Start a new weave."},
 			{"internal_api_secret (secret)",
@@ -352,6 +352,9 @@ start(normal, _Args) ->
 		[set, public, named_table, {read_concurrency, true}]
 	),
 	ets:new(ar_tx_blacklist_pending_data,
+		[set, public, named_table, {read_concurrency, true}]
+	),
+	ets:new(ar_tx_blacklist_pending_restored_offsets,
 		[set, public, named_table, {read_concurrency, true}]
 	),
 	ets:new(ar_tx_blacklist_offsets,

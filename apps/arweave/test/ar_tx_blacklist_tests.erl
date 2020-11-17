@@ -25,12 +25,6 @@ init(Req, State) ->
 handle([<<"empty">>], Req, State) ->
 	{ok, cowboy_req:reply(200, #{}, <<>>, Req), State};
 
-handle([<<"error">>], Req, State) ->
-	{ok, cowboy_req:reply(400, #{}, <<>>, Req), State};
-
-handle([<<"bad">>], Req, State) ->
-	{ok, cowboy_req:reply(200, #{}, <<"bad base64url ">>, Req), State};
-
 handle([<<"good">>], Req, State) ->
 	{ok, cowboy_req:reply(200, #{}, ar_util:encode(hd(State)), Req), State};
 
@@ -58,17 +52,13 @@ test_uses_blacklists() ->
 		GoodOffsets,
 		BadOffsets
 	} = setup(),
+	WhitelistFile = random_filename(),
+	ok = file:write_file(WhitelistFile, <<>>),
 	{MasterNode, _} =
 		start(B0, unclaimed, (element(2, application:get_env(arweave, config)))#config{
 			transaction_blacklist_files = BlacklistFiles,
-			transaction_whitelist_files = [WhitelistFile = random_filename()],
+			transaction_whitelist_files = [WhitelistFile],
 			transaction_blacklist_urls = [
-				%% Does not exist.
-				"http://localhost:1986/none",
-				%% Serves 400.
-				"http://localhost:1985/error",
-				%% Serves invalid Base64URL.
-				"http://localhost:1985/bad",
 				%% Serves empty body.
 				"http://localhost:1985/empty",
 				%% Serves a valid TX ID (one from the BadTXIDs list).
@@ -97,15 +87,14 @@ test_uses_blacklists() ->
 	ok = file:write_file(lists:nth(2, BlacklistFiles), <<>>),
 	ok = file:write_file(lists:nth(3, BlacklistFiles), <<>>),
 	ok = file:write_file(lists:nth(4, BlacklistFiles), ar_util:encode(hd(GoodTXIDs))),
-	[Offsets1, RestoredOffsets | RestOffsets] = BadOffsets,
-	BadOffsets2 = [Offsets1, hd(GoodOffsets) | RestOffsets],
-	[TXID1, _ | RestTXIDs] = BadTXIDs,
-	BadTXIDs2 = [TXID1, hd(GoodTXIDs) | RestTXIDs],
+	[UnblacklistedOffsets, WhitelistOffsets | BadOffsets2] = BadOffsets,
+	RestoredOffsets = [UnblacklistedOffsets, WhitelistOffsets],
+	[_UnblacklistedTXID, _WhitelistTXID | BadTXIDs2] = BadTXIDs,
 	%% Expect the transaction data to be resynced.
-	assert_present_offsets([RestoredOffsets]),
+	assert_present_offsets(RestoredOffsets),
 	%% Expect the freshly blacklisted transaction to be erased.
-	?assertEqual(unavailable, ar_storage:read_tx(hd(GoodTXIDs))),
-	?assertMatch({ok, {{<<"404">>, _}, _, _, _, _}}, get_chunk(hd(GoodOffsets))),
+	assert_removed_txs([hd(GoodTXIDs)]),
+	assert_removed_offsets([hd(GoodOffsets)]),
 	%% Expect the previously blacklisted transactions to stay blacklisted.
 	assert_removed_txs(BadTXIDs2),
 	assert_removed_offsets(BadOffsets2),
