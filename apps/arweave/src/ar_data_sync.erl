@@ -91,7 +91,7 @@ get_chunk(Offset) ->
 	end.
 
 get_chunk(ChunksIndex, ChunkDataIndex, Offset) ->
-	case ar_kv:get_next(ChunksIndex, << Offset:?OFFSET_KEY_BITSIZE >>) of
+	case get_chunk_by_byte(ChunksIndex, Offset) of
 		{error, _} ->
 			{error, chunk_not_found};
 		{ok, Key, Value} ->
@@ -914,7 +914,7 @@ handle_cast({remove_tx_data, TXID, End, Cursor}, State) ->
 		chunk_data_index = ChunkDataIndex,
 		sync_record = SyncRecord
 	} = State,
-	case ar_kv:get_next(ChunksIndex, << Cursor:?OFFSET_KEY_BITSIZE >>) of
+	case get_chunk_by_byte(ChunksIndex, Cursor) of
 		{ok, Key, Chunk} ->
 			<< ChunkEnd:?OFFSET_KEY_BITSIZE >> = Key,
 			case ChunkEnd > End of
@@ -976,6 +976,14 @@ terminate(Reason, State) ->
 %%% Private functions.
 %%%===================================================================
 
+get_chunk_by_byte(ChunksIndex, Byte) ->
+	ar_kv:get_next_by_prefix(
+		ChunksIndex,
+		?OFFSET_KEY_PREFIX_BITSIZE,
+		?OFFSET_KEY_BITSIZE,
+		<< Byte:?OFFSET_KEY_BITSIZE >>
+	).
+
 read_chunk(ChunkDataIndex, DataPathHash) ->
 	case ar_kv:get(ChunkDataIndex, DataPathHash) of
 		not_found ->
@@ -1005,32 +1013,32 @@ delete_chunk(ChunkDataIndex, DataPathHash) ->
 	end.
 
 init_kv() ->
-	Opts = [
-		{cache_index_and_filter_blocks, true},
-		{bloom_filter_policy, 10}, % ~1% false positive probability
-		{prefix_extractor, {capped_prefix_transform, 28}},
-		{optimize_filters_for_hits, true},
-		{max_open_files, 100000},
-		%% 640 MiB per SST file. RocksDB opens every SST file on startup and keeps
-		%% them open.
-		{target_file_size_base, 64 * 10 * 1024 * 1024},
-		%% The tuning guide recommends to set it to 10 times target_file_size_base.
-		%% https://github.com/facebook/rocksdb/wiki/RocksDB-Tuning-Guide.
-		{max_bytes_for_level_base, 64 * 10 * 10 * 1024 * 1024}
+	BaseOpts = [{
+		{max_open_files, 1000000},
+		{target_file_size_base, 200 * 1024 * 1024} % 200 MiB per SST file.
+	}],
+	BloomFilterOpts = [
+		{block_based_table_options, [
+			{cache_index_and_filter_blocks, true}, % Keep bloom filters in memory.
+			{bloom_filter_policy, 10} % ~1% false positive probability.
+		]},
+		{optimize_filters_for_hits, true}
 	],
-	ColumnFamilies = [
-		"default",
-		"chunks_index",
-		"missing_chunks_index",
-		"data_root_index",
-		"data_root_offset_index",
-		"tx_index",
-		"tx_offset_index",
-		"disk_pool_chunks_index",
-		"migrations_index",
-		"chunk_data_index"
+	PrefixBloomFilterOpts =
+		BloomFilterOpts ++ [
+			{prefix_extractor, {capped_prefix_transform, ?OFFSET_KEY_PREFIX_BITSIZE div 8}}],
+	ColumnFamilyDescriptors = [
+		{"default", BaseOpts},
+		{"chunks_index", BaseOpts ++ PrefixBloomFilterOpts},
+		{"missing_chunks_index", BaseOpts},
+		{"data_root_index", BaseOpts ++ BloomFilterOpts},
+		{"data_root_offset_index", BaseOpts},
+		{"tx_index", BaseOpts ++ BloomFilterOpts},
+		{"tx_offset_index", BaseOpts},
+		{"disk_pool_chunks_index", BaseOpts ++ BloomFilterOpts},
+		{"migrations_index", BaseOpts},
+		{"chunk_data_index", BaseOpts ++ BloomFilterOpts}
 	],
-	ColumnFamilyDescriptors = [{Name, Opts} || Name <- ColumnFamilies],
 	{ok, DB, [_, CF1, CF2, CF3, CF4, CF5, CF6, CF7, CF8, CF9]} =
 		ar_kv:open("ar_data_sync_db", ColumnFamilyDescriptors),
 	State = #sync_data_state{
@@ -1588,7 +1596,7 @@ get_random_interval(SyncRecord, PeerSyncRecords, WeaveSize) ->
 	).
 
 has_chunk(ChunksIndex, Byte) ->
-	case ar_kv:get_next(ChunksIndex, << Byte:?OFFSET_KEY_BITSIZE >>) of
+	case get_chunk_by_byte(ChunksIndex, Byte) of
 		{ok, ChunkKey, Chunk}->
 			{_, _, _, _, _, ChunkSize} = binary_to_term(Chunk),
 			<< ChunkEnd:?OFFSET_KEY_BITSIZE >> = ChunkKey,

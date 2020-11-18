@@ -28,7 +28,16 @@
 -endif.
 
 %% @doc The size in bits of the offset key in kv databases.
--define(OFFSET_KEY_BITSIZE, (?NOTE_SIZE * 8)).
+-define(OFFSET_KEY_BITSIZE, 256).
+
+%% @doc The size in bits of the key prefix used in prefix bloom filter
+%% when looking up chunks by offsets from kv database.
+%% 29 bytes of the prefix correspond to the 16777216 (16 Mib) max distance
+%% between the keys with the same prefix. The prefix should be bigger than
+%% max chunk size (256 KiB) so that the chunk in question is likely to be
+%% found in the filter and smaller than an SST table (200 MiB) so that the
+%% filter lookup can narrow the search down to a single table. @end
+-define(OFFSET_KEY_PREFIX_BITSIZE, 232).
 
 %% @doc The number of block confirmations to track. When the node
 %% joins the network or a chain reorg occurs, it uses its record about
