@@ -233,7 +233,7 @@
 	%% different offsets several time and to be able to quickly move chunks from the disk pool
 	%% to the on-chain storage.
 	chunk_data_index,
-    %% @doc A reference to the on-disk key value storage mapping migration names to their
-    %% stages.
-    migrations_index
+	%% @doc A reference to the on-disk key value storage mapping migration names to their
+	%% stages.
+	migrations_index
 }).
