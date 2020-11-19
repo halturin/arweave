@@ -1015,7 +1015,11 @@ delete_chunk(ChunkDataIndex, DataPathHash) ->
 init_kv() ->
 	BaseOpts = [{
 		{max_open_files, 1000000},
-		{target_file_size_base, 200 * 1024 * 1024} % 200 MiB per SST file.
+		{write_buffer_size, 256 * 1024 * 1024}, % 256 MiB per memtable.
+		{target_file_size_base, 256 * 1024 * 1024}, % 256 MiB per SST file.
+		%% 10 files in L1 to make L1 == L0 as recommended by the
+		%% RocksDB guide https://github.com/facebook/rocksdb/wiki/RocksDB-Tuning-Guide.
+		{max_bytes_for_level_base, 10 * 256 * 1024 * 1024}
 	}],
 	BloomFilterOpts = [
 		{block_based_table_options, [

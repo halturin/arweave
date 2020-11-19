@@ -244,7 +244,9 @@ test_rocksdb_iterator() ->
 		{prefix_extractor, {capped_prefix_transform, 29}},
 		{optimize_filters_for_hits, true},
 		{max_open_files, 1000000},
-		{target_file_size_base, 200 * 1024 * 1024}
+		{write_buffer_size, 256 * 1024 * 1024},
+		{target_file_size_base, 256 * 1024 * 1024},
+		{max_bytes_for_level_base, 10 * 256 * 1024 * 1024}
 	],
 	{ok, DB, [_DefaultCF, CF]} = ar_kv:open("test_db", [{"default", Opts2}, {"test", Opts2}]),
 	%% Store new data enough for new SST files to be created.
