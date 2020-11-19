@@ -29,9 +29,15 @@ open(Name) ->
 
 open(Name, CFDescriptors) ->
 	RocksDBDir = filename:join(ar_meta_db:get(data_dir), ?ROCKS_DB_DIR),
+	LogDir = filename:join(RocksDBDir, "logs"),
 	Filename = filename:join(RocksDBDir, Name),
 	ok = filelib:ensure_dir(Filename ++ "/"),
-	Opts = [{create_if_missing, true}, {create_missing_column_families, true}],
+	ok = filelib:ensure_dir(LogDir ++ "/"),
+	Opts = [
+		{create_if_missing, true},
+		{create_missing_column_families, true},
+		{db_log_dir, filename:join(LogDir, Name)}
+	],
 	case rocksdb:open(Filename, Opts, CFDescriptors) of
 		{ok, DB, CFs} ->
 			{ok, DB, CFs};
