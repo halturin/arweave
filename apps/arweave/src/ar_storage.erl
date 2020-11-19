@@ -5,7 +5,7 @@
 	write_block/1, write_full_block/1, write_full_block/2,
 	read_block/1, read_block/2,
 	invalidate_block/1, blocks_on_disk/0,
-	write_tx/1, write_tx_data/1, write_tx_data/2, read_tx/1, read_tx_data/1,
+	write_tx/1, write_tx_data/1, write_tx_data/2, write_tx_data/3, read_tx/1, read_tx_data/1,
 	read_wallet_list/1, write_wallet_list/4, write_wallet_list/2, write_wallet_list_chunk/4,
 	write_block_index/1, read_block_index/0,
 	delete_full_block/1, delete_tx/1, delete_block/1,

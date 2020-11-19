@@ -138,7 +138,7 @@ handle_cast({add_block, B}, State) ->
 
 handle_cast(check_space_alarm, State) ->
 	FreeSpace = ar_storage:get_free_space(),
-	case FreeSpace < ?DISK_HEADERS_BUFFER_SIZE * 2 of
+	case FreeSpace < ?DISK_HEADERS_BUFFER_SIZE of
 		true ->
 			Msg =
 				"The node has stopped syncing headers - the available disk space is"
@@ -457,7 +457,11 @@ move_data_to_v2_index(TXs) ->
 					{error, enoent} ->
 						ok;
 					{ok, Data} ->
-						case ar_storage:write_tx_data(Data) of
+						case ar_storage:write_tx_data(
+									no_expected_data_root,
+									Data,
+									write_to_free_space_buffer
+								) of
 							ok ->
 								file:delete(ar_storage:tx_data_filepath(TX));
 							Error ->
