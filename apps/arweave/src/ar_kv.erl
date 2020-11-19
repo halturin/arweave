@@ -202,7 +202,7 @@ get_range2(Iterator, Map, EndOffsetBinary) ->
 %%%===================================================================
 
 rocksdb_iterator_test_() ->
-	{timeout, 60, fun test_rocksdb_iterator/0}.
+	{timeout, 300, fun test_rocksdb_iterator/0}.
 
 test_rocksdb_iterator() ->
 	destroy("test_db"),
