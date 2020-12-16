@@ -219,7 +219,9 @@ groups() ->
 			deleteValueFromUnknownDB,
 			deleteValueFromUnknownDBCF,
 			deleteRangeFromDB,
-			deleteRangeFromDBCF
+			deleteRangeFromDBCF,
+			deleteRangeFromUnknownDB,
+			deleteRangeFromUnknownDBCF
 		]}
     ].
 
@@ -328,4 +330,9 @@ deleteRangeFromDBCF(_Config) ->
 	not_found = ar_storage1:get({dbcftest, f1}, <<"rr2">>),
 	{ok,<<"valueRR3">>}= ar_storage1:get({dbcftest, f1}, <<"rr3">>),
 	ok.
-
+deleteRangeFromUnknownDB(_Config) ->
+	error = ar_storage1:delete_range(dbtestttt, <<"k2">>, <<"k10">>),
+	ok.
+deleteRangeFromUnknownDBCF(_Config) ->
+	error = ar_storage1:delete_range({dbcftest,f1ffffff}, <<"k2">>, <<"k10">>),
+	ok.
