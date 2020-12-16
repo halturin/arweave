@@ -39,10 +39,10 @@
 % Definition format:
 % { name , opts } for regular
 % { name , [ { CFname, CFopt } ] , opts } for column families database
+%
 list() ->
 	[
 		{ chunks,
-
 			[
 				{default, ?BASE_OPTS},
 				{data_chunks_index, ?BASE_OPTS ++ ?PREFIX_BLOOM_FILTER_OPTS},
@@ -59,11 +59,11 @@ list() ->
 		},
 
 		{ blocks,
-			[ {create_if_missing, true} ]
+			[ {create_if_missing, true}, {files, "blocks"} ]
 		},
 
-		{ txs,
-			[ {create_if_missing, true} ]
+		{ txs, 
+			[ {create_if_missing, true}, {files, "txs"} ]
 		}
 	].
 

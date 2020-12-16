@@ -1,6 +1,6 @@
-%% This Source Code Form is subject to the terms of the GNU General 
-%% Public License, v. 2.0. If a copy of the GPLv2 was not distributed 
-%% with this file, You can obtain one at 
+%% This Source Code Form is subject to the terms of the GNU General
+%% Public License, v. 2.0. If a copy of the GPLv2 was not distributed
+%% with this file, You can obtain one at
 %% https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html
 %%
 %% @author Sam Williams
@@ -227,7 +227,7 @@ handle_cast({add_peer, remote, Peer}, State) ->
 	end;
 
 handle_cast({add_peer, local, Peer}, State) ->
-	#state{ gossip = GS0 } = State, 
+	#state{ gossip = GS0 } = State,
 	GS1 = ar_gossip:add_peers(GS0, Peer),
 	{noreply, State#state{ gossip = GS1}};
 
@@ -255,13 +255,13 @@ handle_cast(Msg, State) ->
 %% @end
 %%--------------------------------------------------------------------
 
-%FIXME do we realy serve gossip messages by the bridge? 
+%FIXME do we realy serve gossip messages by the bridge?
 handle_info(Info, State) when is_record(Info, gs_msg) ->
 	#state{ gossip = GS0 } = State,
 	case ar_gossip:recv(GS0, Info) of
-		{_, ignore} -> 
+		{_, ignore} ->
 			{noreply, State};
-		Gossip -> 
+		Gossip ->
 			State1 = gossip_to_external(State, Gossip),
 			{noreply, State1}
 	end;

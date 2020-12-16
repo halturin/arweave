@@ -110,9 +110,9 @@ show_help() ->
 			{"data_dir", "The directory for storing the weave and the wallets (when generated)."},
 			{"metrics_dir", "The directory for persisted metrics."},
 			{"polling", lists:flatten(
-						  io_lib:format(
-						"Poll peers for new blocks every N seconds. Default is ~p." 
-						"Useful in environments where port forwarding is not possible. ", 
+						 io_lib:format(
+						"Poll peers for new blocks every N seconds. Default is ~p."
+						"Useful in environments where port forwarding is not possible. ",
 						[?DEFAULT_POLLING_INTERVAL div 1000]
 						  )
 						)
@@ -298,8 +298,8 @@ start(normal, _Args) ->
 	{ok, Config} = application:get_env(arweave, config),
 
 	% configure logging for console output
-	LoggerFormatterConsole = #{ 
-		legacy_header => false, 
+	LoggerFormatterConsole = #{
+		legacy_header => false,
 		single_line => true,
 		chars_limit => 512,
 		depth => 16,
@@ -314,7 +314,7 @@ start(normal, _Args) ->
 		max_no_files => 10,
 		max_no_bytes => 51418800 % 10 x 5MB
 	},
-	logger:add_handler(disk_log, logger_disk_log_h, 
+	logger:add_handler(disk_log, logger_disk_log_h,
 					   #{config => LoggerConfigDisk,
 						 level => error}),
 	LoggerFormatterDisk = #{
@@ -384,8 +384,8 @@ prepare_graphql() ->
 	ok = ar_graphql:load_schema(),
 	ok.
 
-%FIXME remove it later 
-%% @doc Create a name for a session log file. 
+%FIXME remove it later
+%% @doc Create a name for a session log file.
 %generate_logfile_name() ->
 %	{{Yr, Mo, Da}, {Hr, Mi, Se}} = erlang:universaltime(),
 %	lists:flatten(
