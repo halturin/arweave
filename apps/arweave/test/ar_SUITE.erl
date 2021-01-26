@@ -12,8 +12,15 @@
 
 %% TESTS
 -export([
+	% basic
 	mod_exist/1,
-	fork_recovery/1
+	%ar_data_sync.erl
+	fork_recovery/1,
+	% ar_events.erl
+	events_subscribe/1,
+	events_cancel/1,
+	events_send/1,
+	events_process_terminated/1
 ]).
 
 %%--------------------------------------------------------------------
@@ -169,7 +176,12 @@ end_per_testcase(_TestCase, Config) ->
 groups() ->
     [
     {nodeBasic,[sequence], [
-			fork_recovery
+			fork_recovery,
+			events_subscribe,
+			events_cancel,
+			events_send,
+			events_process_terminated
+
         ]}
     ].
 
@@ -199,8 +211,15 @@ all() ->
 %% Note! Please, dont use this module for the tests. Wrap it up by the
 %% short function and put the real test implementation into the external module.
 %% Lets keep this module clean.
-mod_exist(_Config) -> {module, ar_node} = code:load_file(ar_node).
+mod_exist(_Config) ->
+	{module, ar_node} = code:load_file(ar_node),
+	{module, ar_events} = code:load_file(ar_events).
+
 fork_recovery(Config) -> ar_test_fork:fork_recovery(Config).
+events_subscribe(Config) -> ar_test_events:subscribe(Config).
+events_cancel(Config) -> ar_test_events:cancel(Config).
+events_send(Config) -> ar_test_events:send(Config).
+events_process_terminated(Config) -> ar_test_events:process_terminated(Config).
 
 %%
 %% private functions
