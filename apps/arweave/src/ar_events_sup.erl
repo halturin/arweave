@@ -29,15 +29,15 @@ start_link() ->
 init([]) ->
 	{ok, {{one_for_one, 5, 10}, [
 		% events: join/leave/request (income http requests)
-		?CHILD(ar_events, ar_events:event_to_process(network), worker),
+		?CHILD(ar_events, network, worker),
 		% events: fork, ...
-		?CHILD(ar_events, ar_events:event_to_process(attack), worker),
+		?CHILD(ar_events, attack, worker),
 		% events: join/leave/response
-		?CHILD(ar_events, ar_events:event_to_process(peer), worker),
+		?CHILD(ar_events, peer, worker),
 		% events: start/stop mining process
-		?CHILD(ar_events, ar_events:event_to_process(mining), worker),
+		?CHILD(ar_events, mining, worker),
 		% events: mined/received block
-		?CHILD(ar_events, ar_events:event_to_process(block), worker),
+		?CHILD(ar_events, block, worker),
 		% events: received txs for mine
-		?CHILD(ar_events, ar_events:event_to_process(txs), worker)
+		?CHILD(ar_events, txs, worker)
 	]}}.

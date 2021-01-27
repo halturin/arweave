@@ -53,10 +53,10 @@ send(Event, Value) ->
 	Process = event_to_process(Event),
 	% Check whether this process alive
 	case whereis(Process) of
-	undefined ->
+		undefined ->
 			error;
-	_ ->
-		gen_server:cast(Process, {send, self(), Value})
+		_ ->
+			gen_server:cast(Process, {send, self(), Value})
 	end.
 
 %%--------------------------------------------------------------------
@@ -67,7 +67,8 @@ send(Event, Value) ->
 %% @end
 %%--------------------------------------------------------------------
 start_link(Name) ->
-	gen_server:start_link({local, Name}, ?MODULE, Name, []).
+    RegName = ar_events:event_to_process(Name),
+	gen_server:start_link({local, RegName}, ?MODULE, Name, []).
 
 %%% gen_server callbacks
 %%%===================================================================
@@ -135,7 +136,7 @@ handle_call(Request, _From, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_cast({send, _From, Value}, State) ->
-	[Pid ! Value || Pid <- maps:keys(State#state.subscribers)],
+	[Pid ! {event, State#state.name, Value} || Pid <- maps:keys(State#state.subscribers)],
 	{noreply, State};
 handle_cast(Msg, State) ->
 	?LOG_ERROR([{event, unhandled_cast}, {module, ?MODULE}, {message, Msg}]),

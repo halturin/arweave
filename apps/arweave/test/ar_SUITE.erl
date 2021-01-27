@@ -17,9 +17,7 @@
 	%ar_data_sync.erl
 	fork_recovery/1,
 	% ar_events.erl
-	events_subscribe/1,
-	events_cancel/1,
-	events_send/1,
+	events_subscribe_send_cancel/1,
 	events_process_terminated/1
 ]).
 
@@ -177,9 +175,7 @@ groups() ->
     [
     {nodeBasic,[sequence], [
 			fork_recovery,
-			events_subscribe,
-			events_cancel,
-			events_send,
+			events_subscribe_send_cancel,
 			events_process_terminated
 
         ]}
@@ -216,9 +212,7 @@ mod_exist(_Config) ->
 	{module, ar_events} = code:load_file(ar_events).
 
 fork_recovery(Config) -> ar_test_fork:fork_recovery(Config).
-events_subscribe(Config) -> ar_test_events:subscribe(Config).
-events_cancel(Config) -> ar_test_events:cancel(Config).
-events_send(Config) -> ar_test_events:send(Config).
+events_subscribe_send_cancel(Config) -> ar_test_events:subscribe_send_cancel(Config).
 events_process_terminated(Config) -> ar_test_events:process_terminated(Config).
 
 %%
@@ -226,8 +220,8 @@ events_process_terminated(Config) -> ar_test_events:process_terminated(Config).
 %%
 
 start_slave_node() ->
-	{ok, Slave} = ct_slave:start('slave', [{monitor_master, true}]),
-	ok = rpc:call(Slave, code, add_pathsz, [code:get_path()]),
+	{ok, Slave} = ct_slave:start('slave@localhost', [{monitor_master, true}]),
+	ok = ct_rpc:call(Slave, code, add_pathsz, [code:get_path()]),
 	Slave.
 
 stop_slave_node(Config) ->
