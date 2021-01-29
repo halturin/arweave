@@ -18,7 +18,10 @@
 	fork_recovery/1,
 	% ar_events.erl
 	events_subscribe_send_cancel/1,
-	events_process_terminated/1
+	events_process_terminated/1,
+	% ar_rating.erl
+	rating_join_peer/1,
+	rating_rejoin_peer/1
 ]).
 
 %%--------------------------------------------------------------------
@@ -176,7 +179,9 @@ groups() ->
     {nodeBasic,[sequence], [
 			fork_recovery,
 			events_subscribe_send_cancel,
-			events_process_terminated
+			events_process_terminated,
+			rating_join_peer,
+			rating_rejoin_peer
 
         ]}
     ].
@@ -207,13 +212,18 @@ all() ->
 %% Note! Please, dont use this module for the tests. Wrap it up by the
 %% short function and put the real test implementation into the external module.
 %% Lets keep this module clean.
-mod_exist(_Config) ->
+mod_exist(Config) ->
 	{module, ar_node} = code:load_file(ar_node),
-	{module, ar_events} = code:load_file(ar_events).
+	{module, ar_events} = code:load_file(ar_events),
+	{module, ar_rating} = code:load_file(ar_rating),
+	Config.
+
 
 fork_recovery(Config) -> ar_test_fork:fork_recovery(Config).
 events_subscribe_send_cancel(Config) -> ar_test_events:subscribe_send_cancel(Config).
 events_process_terminated(Config) -> ar_test_events:process_terminated(Config).
+rating_join_peer(Config) -> ar_test_rating:join(Config).
+rating_rejoin_peer(Config) -> ar_test_rating:rejoin(Config).
 
 %%
 %% private functions
