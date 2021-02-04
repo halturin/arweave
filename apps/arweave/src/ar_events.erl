@@ -41,9 +41,14 @@
 %%%===================================================================
 event_to_process(Event) when is_atom(Event) -> list_to_atom("ar_event_"++atom_to_list(Event)).
 
-subscribe(Event) ->
+subscribe(Event) when is_atom(Event) ->
+	subscribe([Event]);
+subscribe([]) ->
+	ok;
+subscribe([Event | Events]) ->
 	Process = event_to_process(Event),
-	gen_server:call(Process, subscribe).
+	gen_server:call(Process, subscribe),
+	subscribe(Events).
 
 cancel(Event) ->
 	Process = event_to_process(Event),

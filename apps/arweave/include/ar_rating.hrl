@@ -6,16 +6,10 @@
 -ifndef(AR_RATING_HRL).
 -define(AR_RATING_HRL, true).
 
--record(event_peer_response, {
-	request = any :: atom(),
-	time = 0 :: non_neg_integer()
-}).
-
--record(event_peer_request, {
-	% peer id we got this request from
+-record(event_peer, {
 	peer = unknown,
 	request = any :: atom(),
-	timestamp = os:system_time()
+	time = 0 :: non_neg_integer() % response time or request timestamp
 }).
 
 

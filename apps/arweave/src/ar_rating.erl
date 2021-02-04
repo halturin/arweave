@@ -24,10 +24,15 @@
 %%% By value:
 %%%   * Time response - descrease rating for the slowest peers and increase
 %%%                     for the others
-%%%   * Lifespan - too short lifespan, as well as too long one, should decrease
-%%%                peer's rating in order to keep motivation of rotating/refreshing
-%%%                in the 'favorite list'
 %%%
+%%%   * Lifespan -  age influencing. its getting bigger by the type from 0 to 1
+%%%
+%%%                                 1
+%%%                influence = ------------ + 1
+%%%                             -EXP(T/S)
+%%%
+%%%				T - number of days since we got this peer
+%%%				S - how slow this influence should growth
 %%% @end
 -module(ar_rating).
 
@@ -53,32 +58,25 @@
 -include_lib("arweave/include/ar.hrl").
 -include_lib("arweave/include/ar_config.hrl").
 
+-define(COMPUTE_RATING_PERIOD, 60000).
+
 % This record is using as a data structure for the 'rating' database (RocksDB)
 -record(rating, {
 	% Keep the date of starting this peering.
-	since = os:system_time(),
-
+	since = os:system_time(second),
 	% Just a basic level of trust for the newbies (or respawned peering).
-	base_bonus = 100,
-
+	base_bonus = 1000,
 	% Bonus and penalties for the responses from the peer
-	resp_bonus,
-	resp_penalty,
-
+	resp_bonus = 0,
+	resp_penalty = 0,
 	% ... for the requests for any kind of information (chunks, blocks, etc...)
-	req_bonus,
-	req_penalty,
-
+	req_bonus = 0,
+	req_penalty = 0,
 	% ... for the sharing txs,blocks with our node
-	push_bonus,
-	push_penalty,
-
-	% We should keep the information about any peer we had a relationship with.
-	% Once a peering has ended up, this record is stored into the 'respawn' list as a value
-	% {Until, Rating} and the rest fields are zeroing out.
-	% Keep last N items of peer relationship, just for history. Might be used
-	% in the future (some global reputation)
-	respawns = []
+	push_bonus = 0,
+	push_penalty = 0,
+	% when it was last time updated
+	last_update = os:system_time(second)
 }).
 
 %% Internal state definition.
@@ -89,28 +87,37 @@
 	peers = #{},
 	% Set of options how we should compute and keep the rating
 	options = #{
-		% Number of items we should use to compute moving average
-		% of the response time.
-		response_time_MA_n => 10,
-
 		% Period of time we should count requests (in sec) in order
 		% to compute value Request per Period
 		request_time_period => 60,
 
-		% A number of days being a peer. The main idea behind this number
-		% is to force this node to refresh peers its working with.
-		% The first half of its age this value makes a positive effect
-		% (getting better by the time), but the second half it makes
-		% a negative effect (increasing negative influence by the time)
-		% until the moment this limit has reached.
-		peering_age_limit => 14,
-
-		% keep last N records about the peer
-		respawn_history_length => 10,
-
-		base_bonus => 100
+		% 'starter pack' for the new comming peers
+		base_bonus => 1000
 	},
-	responses = #{},
+	% recompute ratings for the peers who got updates
+	% and write them into the DB
+	peers_got_changes = #{},
+
+	rates = #{
+		% bonuses
+		{request, tx} => 10,
+		{request, block} => 20,
+		{request, chunk} => 30,
+		{push, tx} => 100,
+		{push, block} => 200,
+		% Rate for the response = 1000 - T (in ms). longer response could make this value negative
+		{response, tx} => 1000,
+		{response, block} => 2000,
+		{response, chunk} => 3000,
+		{response, any} => 100,
+		% penalties
+		{request, malformed} => -10000,
+		{response, malformed} => -10000,
+		{response, timeout} => -1000,
+		{response, not_found} => -500,
+		{push, malformed} => -10000,
+		attack => -10000000000000000
+	},
 
 	% RocksDB reference
 	db
@@ -154,11 +161,8 @@ start_link() ->
 init([]) ->
 	process_flag(trap_exit, true),
 	{ok, Ref} = ar_kv:open("ratings"),
-	ar_events:subscribe(network),
-	ar_events:subscribe(peer),
-	ar_events:subscribe(blocks),
-	ar_events:subscribe(txs),
-	ar_events:subscribe(chunks),
+	ar_events:subscribe([network, peer, blocks, txs, chunks, attack]),
+	erlang:send_after(?COMPUTE_RATING_PERIOD, ?MODULE, {'$gen_cast', compute_ratings}),
 	{ok, #state{db = Ref}}.
 
 %%--------------------------------------------------------------------
@@ -197,6 +201,22 @@ handle_call(Request, _From, State) ->
 %%									{stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_cast(compute_ratings, State) ->
+	PeersGotChanges = State#state.peers_got_changes,
+	Peers = State#state.peers,
+	DB = State#state.db,
+	Peers1 = maps:fold(fun (Peer, _Value, Ps) ->
+							update_rating(Peer, Ps, DB)
+					   end,
+					   Peers,
+					   PeersGotChanges),
+
+	erlang:send_after(?COMPUTE_RATING_PERIOD, ?MODULE, {'$gen_cast', compute_ratings}),
+	State1 = State#state{
+		peers_got_changes = #{},
+		peers = Peers1
+	},
+	{noreply, State1};
 handle_cast(Msg, State) ->
 	?LOG_ERROR([{event, unhandled_cast}, {message, Msg}]),
 	{noreply, State}.
@@ -211,50 +231,80 @@ handle_cast(Msg, State) ->
 %%									 {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_info({event, network, join}, State) ->
+handle_info({event, network, joined}, State) ->
 	{noreply, State#state{joined = true}};
 handle_info({event, _, _}, State) when State#state.joined == false ->
 	% ignore everything until node has joined to the arweave network
 	{noreply, State};
-handle_info({event, network, leave}, State) ->
+handle_info({event, network, left}, State) ->
 	{noreply, State#state{joined = false}};
-% requests from the peer to get an infomation. it can be useful
-% to set a limit for req/s for the peers with low rating
-handle_info({event, peer, {request, malformed, Request}}, State)
-  	when is_record(Request, event_peer_request) ->
-	{noreply, State};
-handle_info({event, peer, {request, txs, Request}}, State)
-  	when is_record(Request, event_peer_request) ->
-	{noreply, State};
-handle_info({event, peer, {request, _Kind, Request}}, State)
-  	when is_record(Request, event_peer_request) ->
-	% do nothing for the rest
-	{noreply, State};
-% request from the peer to put an information
-handle_info({event, peer, {push, malformed, Request}}, State)
-  	when is_record(Request, event_peer_request) ->
-	{noreply, State};
-handle_info({event, peer, {push, txs, Request}}, State)
-  	when is_record(Request, event_peer_request) ->
-	{noreply, State};
-handle_info({event, peer, {push, blocks, Request}}, State)
-  	when is_record(Request, event_peer_request) ->
-	{noreply, State};
-% response from the peer on our request
-handle_info({event, peer, {response, malformed, Response}}, State)
-  	when is_record(Response, event_peer_response) ->
-	{noreply, State};
-handle_info({event, peer, {response, timeout, Response}}, State)
-  	when is_record(Response, event_peer_response) ->
-	{noreply, State};
-handle_info({event, peer, {response, not_found, Response}}, State)
-  	when is_record(Response, event_peer_response) ->
-	{noreply, State};
-handle_info({event, peer, {response, _Any, Response}}, State)
-  	when is_record(Response, event_peer_response) ->
-	{noreply, State};
+% requests from the peer
+handle_info({event, peer, {Act, Kind, Request}}, State)
+  	when is_record(Request, event_peer) ->
+	Peer = Request#event_peer.peer,
+	Rate = maps:get({Act, Kind}, State#state.rates, 0),
+	% Decrease Rate on a Time value - longest response whould get lowest rate.
+	% In case of negative - count it as a penalty
+	Time = Request#event_peer.time,
+	case maps:get(Peer, State#state.peers, undefined) of
+		undefined ->
+			{noreply, State};
+		_ when Rate == 0 ->
+			% do nothing.
+			{noreply, State};
+		Rating when Act == push, Rate > 0  ->
+			Rating1 = Rating#rating{
+				push_bonus = Rating#rating.push_bonus + Rate,
+				last_update = os:system_time(second)
+			},
+			Peers = maps:put(Peer, Rating1, State#state.peers),
+			PeersGotChanges = maps:put(Peer, true, State#state.peers_got_changes),
+			{noreply, State#state{peers = Peers, peers_got_changes = PeersGotChanges}};
+		Rating when Act == push ->
+			Rating1 = Rating#rating{
+				push_penalty = Rating#rating.push_penalty + Rate,
+				last_update = os:system_time(second)
+			},
+			Peers = maps:put(Peer, Rating1, State#state.peers),
+			PeersGotChanges = maps:put(Peer, true, State#state.peers_got_changes),
+			{noreply, State#state{peers = Peers, peers_got_changes = PeersGotChanges}};
+		Rating when Act == response, Rate-Time > 0  ->
+			Rating1 = Rating#rating{
+				resp_bonus = Rating#rating.resp_bonus + Rate - Time,
+				last_update = os:system_time(second)
+			},
+			Peers = maps:put(Peer, Rating1, State#state.peers),
+			PeersGotChanges = maps:put(Peer, true, State#state.peers_got_changes),
+			{noreply, State#state{peers = Peers, peers_got_changes = PeersGotChanges}};
+		Rating when Act == response ->
+			Rating1 = Rating#rating{
+				resp_penalty = Rating#rating.resp_penalty + Time - Rate,
+				last_update = os:system_time(second)
+			},
+			Peers = maps:put(Peer, Rating1, State#state.peers),
+			PeersGotChanges = maps:put(Peer, true, State#state.peers_got_changes),
+			{noreply, State#state{peers = Peers, peers_got_changes = PeersGotChanges}};
+		Rating when Act == request, Rate > 0  ->
+			Rating1 = Rating#rating{
+				req_bonus = Rating#rating.req_bonus + Rate,
+				last_update = os:system_time(second)
+			},
+			Peers = maps:put(Peer, Rating1, State#state.peers),
+			PeersGotChanges = maps:put(Peer, true, State#state.peers_got_changes),
+			{noreply, State#state{peers = Peers, peers_got_changes = PeersGotChanges}};
+		Rating when Act == request ->
+			Rating1 = Rating#rating{
+				req_penalty = Rating#rating.req_penalty + Rate,
+				last_update = os:system_time(second)
+			},
+			Peers = maps:put(Peer, Rating1, State#state.peers),
+			PeersGotChanges = maps:put(Peer, true, State#state.peers_got_changes),
+			{noreply, State#state{peers = Peers, peers_got_changes = PeersGotChanges}}
+
+	end;
+
 % just got a new peer
-handle_info({event, peer, {join, Peer}}, State) ->
+handle_info({event, peer, {joined, Peer}}, State) ->
 	% check whether we had a peering with this Peer
 	Bin = term_to_binary(Peer),
 	Rating = case ar_kv:get(State#state.db, Bin) of
@@ -266,6 +316,18 @@ handle_info({event, peer, {join, Peer}}, State) ->
 			binary_to_term(R)
 	end,
 	Peers = maps:put(Peer, Rating, State#state.peers),
+	{noreply, State#state{peers = Peers}};
+
+% peer just left
+handle_info({event, peer, {left, Peer}}, State) ->
+	Peers = maps:remove(Peer, State#state.peers),
+	{noreply, State#state{peers = Peers}};
+
+handle_info({event, attack, Peer}, State) ->
+	Rate = maps:get(attack, State#state.rates, -10000000000000000),
+	Rating = #rating{base_bonus = Rate},
+	Peers = maps:put(Peer, Rating, State#state.peers),
+	update_rating(Peer, Peers, State#state.db),
 	{noreply, State#state{peers = Peers}};
 
 handle_info(Info, State) ->
@@ -301,3 +363,24 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+update_rating(Peer, Peers, DB) ->
+	case maps:get(Peer, Peers, unknown) of
+		unknown ->
+			Peers;
+		Rating ->
+			ar_kv:put(DB, Peer, Rating),
+			R = Rating#rating.base_bonus +
+				Rating#rating.resp_bonus +
+				Rating#rating.resp_penalty +
+				Rating#rating.req_bonus +
+				Rating#rating.req_penalty +
+				Rating#rating.push_bonus +
+				Rating#rating.push_penalty,
+			ban_if_deserved(Peer, R)
+	end.
+
+ban_if_deserved(Peer, Rating) when Rating < 0 ->
+	Until = os:system_time(second) + Rating * 60,
+	ar_events:send(access, {ban, Peer, Until});
+ban_if_deserved(_Peer, _Rating) ->
+	ok.

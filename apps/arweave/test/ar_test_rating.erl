@@ -7,12 +7,17 @@
 
 -export([
 	join/1,
-	rejoin/1
+	rejoin/1,
+	check_requests_MA/1,
+	check_requests_bonuses/1,
+	check_requests_penalties/1,
+	check_ban_and_limit/1,
+	check_peer_lifespan/1
 ]).
 
 join(_Config) ->
 	check_join(),
-	{state, _Joined, _Peers, _Options, _Resp, RatingDB} = sys:get_state(ar_rating),
+	{state, _Joined, _Peers, _Options, _Resp, _Rates, RatingDB} = sys:get_state(ar_rating),
 	Peer = peer1,
 	case ar_kv:get(RatingDB, term_to_binary(Peer)) of
 		not_found ->
@@ -24,7 +29,7 @@ join(_Config) ->
 		WTF1 ->
 			ct:fail("WTF ~p", [WTF1])
 	end,
-	ok = ar_events:send(peer, {join, Peer}),
+	ok = ar_events:send(peer, {joined, Peer}),
 	% just to make sure if this message processed
 	timer:sleep(200),
 	case ar_kv:get(RatingDB, term_to_binary(Peer)) of
@@ -38,7 +43,7 @@ join(_Config) ->
 			ct:fail("WTF ~p", [WTF2])
 	end,
 
-	{state, _Joined1, Peers, _Options1, _Resp1, _DB1} = sys:get_state(ar_rating),
+	{state, _Joined1, Peers, _Options1, _Resp1, _Rates, _DB1} = sys:get_state(ar_rating),
 	case maps:get(Peer, Peers, unknown) of
 		unknown ->
 			ct:fail("Peer is not found in the rating' state");
@@ -72,7 +77,7 @@ rejoin(_Config) ->
 		_ ->
 			ct:fail("is ar_rating restarted? state hasn't cleared up")
 	end,
-	ok = ar_events:send(peer, {join, Peer}),
+	ok = ar_events:send(peer, {joined, Peer}),
 	% just to make sure if this message processed
 	timer:sleep(200),
 	{state, _Joined1, Peers1, _Options1, _Resp1, _DB1} = sys:get_state(ar_rating),
@@ -84,6 +89,16 @@ rejoin(_Config) ->
 	end,
 	ok.
 
+check_requests_MA(_Config) ->
+	ok.
+check_requests_bonuses(_Config) ->
+	ok.
+check_requests_penalties(_Config) ->
+	ok.
+check_ban_and_limit(_Config) ->
+	ok.
+check_peer_lifespan(_Config) ->
+	ok.
 
 %% Private functions
 
@@ -93,8 +108,9 @@ check_join() ->
 check_join(false) ->
 	% emulate event that we joined to the arweave network. otherwise everything
 	% will be ignored
-	ar_events:send(network, join),
+	ar_events:send(network, joined),
 	% should be enough
 	timer:sleep(100);
 check_join(true) ->
 	ok.
+
