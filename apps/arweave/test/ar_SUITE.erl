@@ -230,7 +230,7 @@ rating_rejoin_peer(Config) -> ar_test_rating:rejoin(Config).
 %%
 
 start_slave_node() ->
-	{ok, Slave} = ct_slave:start('slave@localhost', [{monitor_master, true}]),
+	{ok, Slave} = ct_slave:start('slave', [{monitor_master, true}]),
 	ok = ct_rpc:call(Slave, code, add_pathsz, [code:get_path()]),
 	Slave.
 

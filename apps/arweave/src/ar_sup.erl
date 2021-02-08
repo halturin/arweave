@@ -41,6 +41,7 @@ init([]) ->
 	ets:new(ar_tx_blacklist_offsets,
 		[ordered_set, public, named_table, {read_concurrency, true}]),
 	ets:new(node_state, [set, public, named_table]),
+	ets:new(ar_rating, [set, public, named_table]),
 	{ok, {{one_for_one, 5, 10}, [
 		?CHILD(ar_disksup, worker),
 		?CHILD(ar_meta_db, worker),
