@@ -86,6 +86,8 @@
 
 %% Internal state definition.
 -record(state, {
+	% are we connected to the arweave network?
+	joined = false,
 	% Set of options how we should compute and keep the rating
 	options = #{
 		% Period of time we should count requests (in sec) in order
@@ -106,37 +108,44 @@
 		{request, tx} => 10,
 		{request, block} => 20,
 		{request, chunk} => 30,
-		{push, tx} => 100,
-		{push, block} => 200,
-		% Rate for the response = 1000 - T (in ms). longer response could make this value negative
+		% Rate for the push/response = Bonus - T (in ms). longer time could make this value negative
+		{push, tx} => 1000,
+		{push, block} => 2000,
 		{response, tx} => 1000,
 		{response, block} => 2000,
 		{response, chunk} => 3000,
-		{response, any} => 100,
+		{response, any} => 1000,
 		% penalties
 		{request, malformed} => -1000,
 		{response, malformed} => -10000,
-		{response, timeout} => -1000,
+		{response, request_timeout} => -1000,
+		{response, connect_timeout} => 0,
 		{response, not_found} => -500,
 		{push, malformed} => -10000,
-		attack => -10000000000000000
+		{attack, any} => -10000
 	},
 
 	% Call Trigger(Value) if event happend N times during period P(in sec).
-	% {act, kind} => {N, P, Trigger, Value}
+	% {act, kind} => {N, P, Trigger, Value}.
 	% Triggering call happens if it has a rate with the same name {act, kind}.
 	% Otherwise it will be ignored.
 	triggers = #{
 		% If we got 30 blocks during last hour from the same peer
-		% lets provide him extra bonus for the stable peering
+		% lets provide an extra bonus for the stable peering.
 		{push, block} => {30, 3600, bonus, 500},
-		% ban for an hour for the malformed request
+		% ban for an hour for the malformed request (10 times during an hour)
 		{request, malformed} => {10, 3600, ban, 60},
-		% exceeding the limit of 60 requests per 1 minute
-		% decreases rate by 10 points
+		% Exceeding the limit of 60 requests per 1 minute
+		% decreases rate by 10 points.
 		{request, tx} => {60, 60, penalty, 10},
-		% instant penalty for the attack. ban for the next 24 hours
-		attack => {1, 0, ban, 1440}
+		% If we got timeout few times we should handle it as a peer
+		% disconnection with removing it from the rating. We also
+		% have to inform the other processes that its went offline.
+		% Once the last peer went offline this node should handle
+		% the disconnection process from the arweave network.
+		{response, connect_timeout} => {5, 300, offline, 0},
+		% Instant ban for the attack (for the next 24 hours).
+		{attack, any} => {1, 0, ban, 1440}
 	},
 
 	% RocksDB reference
@@ -250,14 +259,14 @@ handle_cast(Msg, State) ->
 %% @end
 %%--------------------------------------------------------------------
 
+handle_info({event, network, joined}, State) ->
+	{noreply, State#state{joined = true}};
 % uncomment these lines once we implement join/leave arweave network event
-%handle_info({event, network, joined}, State) ->
-%	{noreply, State#state{joined = true}};
 %handle_info({event, _, _}, State) when State#state.joined == false ->
 %	% ignore everything until node has joined to the arweave network
 %	{noreply, State};
-%handle_info({event, network, left}, State) ->
-%	{noreply, State#state{joined = false}};
+handle_info({event, network, left}, State) ->
+	{noreply, State#state{joined = false}};
 
 % requests from the peer
 handle_info({event, peer, {Act, Kind, Request}}, State)
@@ -274,11 +283,21 @@ handle_info({event, peer, {Act, Kind, Request}}, State)
 		_ when Rate == 0 ->
 			% do nothing.
 			{noreply, State};
-		[{Rating, History}] when Act == push, Rate > 0  ->
+		[{Rating, History}] when Act == attack ->
+			T = os:system_time(second),
+			{_ExtraRate, History1} = trigger(Trigger, Peer, History, T),
+			Rating1 = Rating#rating{
+				base_bonus = {Rating#rating.base_bonus + Rate, History1},
+				last_update = T
+			},
+			ets:insert(?MODULE, {{peer, Peer}, Rating1}),
+			update_rating(Peer, State#state.db),
+			{noreply, State};
+		[{Rating, History}] when Act == push, Rate-Time > 0  ->
 			T = os:system_time(second),
 			{ExtraRate, History1} = trigger(Trigger, Peer, History, T),
 			Rating1 = Rating#rating{
-				push_bonus = {Rating#rating.push_bonus + Rate + ExtraRate, History1},
+				push_bonus = {Rating#rating.push_bonus + Rate - Time + ExtraRate, History1},
 				last_update = T
 			},
 			ets:insert(?MODULE, {{peer, Peer}, Rating1}),
@@ -288,7 +307,7 @@ handle_info({event, peer, {Act, Kind, Request}}, State)
 			T = os:system_time(second),
 			{ExtraRate, History1} = trigger(Trigger, Peer, History, T),
 			Rating1 = Rating#rating{
-				push_penalty = {Rating#rating.push_penalty + Rate + ExtraRate, History1},
+				push_penalty = {Rating#rating.push_penalty + Rate - Time + ExtraRate, History1},
 				last_update = T
 			},
 			ets:insert(?MODULE, {{peer, Peer}, Rating1}),
@@ -353,15 +372,18 @@ handle_info({event, peer, {joined, Peer}}, State) ->
 
 % peer just left
 handle_info({event, peer, {left, Peer}}, State) ->
-	ets:delete(?MODULE, {peer, Peer}),
-	{noreply, State};
-
-handle_info({event, attack, Peer}, State) ->
-	Rate = maps:get(attack, State#state.rates, -10000000000000000),
-	Rating = #rating{base_bonus = Rate},
-	ets:insert(?MODULE, {{peer, Peer}, Rating}),
 	update_rating(Peer, State#state.db),
-	{noreply, State};
+	ets:delete(?MODULE, {peer, Peer}),
+	case ets:info(?MODULE, size) of
+		0 ->
+			% it was the last one. now we are disconnected from
+			% the arweave network and should initiate the joining
+			% process again
+			ar_events:send(network, left),
+			{noreply, State};
+		_ ->
+			{noreply, State}
+	end;
 
 handle_info(Info, State) ->
 	?LOG_ERROR([{event, unhandled_info}, {info, Info}]),
@@ -453,6 +475,9 @@ trigger({N, P, Trigger, V}, Peer, History, T) ->
 		_ when Trigger == bonus ->
 			{V, History1};
 		_ when Trigger == penalty ->
-			{-V, History1}
+			{-V, History1};
+		_ when Trigger == offline ->
+			ar_events:send(peer, {left, Peer}),
+			{0, History1}
 	end.
 
