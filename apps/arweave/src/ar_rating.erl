@@ -4,28 +4,26 @@
 %% https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html
 
 %%% @doc Rating. We should compute rating for every single peer in
-%%%
 %%% order to give highest priority for the good nodes and decrease
-%%% an influence of the bad ones (including the ban). Here are 3 kind
-%%% of variables for the Rating formula - positive, negative, by value.
+%%% an influence of the bad ones (including ban for the bad behavior).
+%%% Here are 3 kind of variables for the Rating formula - positive, negative, by value.
 %%% Positive variables:
-%%%   * Join bonus - provides to every new node we have no record before in
-%%%                  the rating table
-%%%   * Response
-%%%   * Mining
-%%%     * receive new valid block
+%%%   * Join bonus (aka base bonus) - provides for the new node we had
+%%%     no record before in the rating table
+%%%   * Response - getting response for the request with depending of the time response
+%%%   * Push - peer shares an information
 %%% Negative variables:
 %%%   * Bad/Wrong response on our request
 %%%     - malformed
 %%%     - 404 for the data
+%%%     - timeouts
 %%%   * Bad/Wrong request
 %%%     - to get any information
 %%%     - to post (tx, block)
 %%% By value:
 %%%   * Time response - descrease rating for the slowest peers and increase
 %%%                     for the others
-%%%
-%%%   * Lifespan -  age influencing. its getting bigger by the type from 0 to 1
+%%%   * Lifespan -  age influencing. its getting bigger by the time from 0 to 1
 %%%
 %%%                                 1
 %%%                influence = ------------ + 1
@@ -33,6 +31,10 @@
 %%%
 %%%				T - number of days since we got this peer
 %%%				S - how slow this influence should growth
+%%%
+%%%	This module also provides triggering mechanic in order to handle conditioned
+%%%	behaviour (if some action was repeated N times during the period P).
+%%%
 %%% @end
 -module(ar_rating).
 
