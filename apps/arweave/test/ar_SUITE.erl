@@ -20,8 +20,7 @@
 	events_subscribe_send_cancel/1,
 	events_process_terminated/1,
 	% ar_rating.erl
-	rating_join_peer/1,
-	rating_rejoin_peer/1
+	rating_peer_join_leave_rejoin/1
 ]).
 
 %%--------------------------------------------------------------------
@@ -180,9 +179,7 @@ groups() ->
 			fork_recovery,
 			events_subscribe_send_cancel,
 			events_process_terminated,
-			rating_join_peer,
-			rating_rejoin_peer
-
+			rating_peer_join_leave_rejoin
         ]}
     ].
 
@@ -222,8 +219,7 @@ mod_exist(Config) ->
 fork_recovery(Config) -> ar_test_fork:fork_recovery(Config).
 events_subscribe_send_cancel(Config) -> ar_test_events:subscribe_send_cancel(Config).
 events_process_terminated(Config) -> ar_test_events:process_terminated(Config).
-rating_join_peer(Config) -> ar_test_rating:join(Config).
-rating_rejoin_peer(Config) -> ar_test_rating:rejoin(Config).
+rating_peer_join_leave_rejoin(Config) -> ar_test_rating:peer_join_leave_rejoin(Config).
 
 %%
 %% private functions

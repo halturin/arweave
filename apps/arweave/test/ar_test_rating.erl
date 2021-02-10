@@ -6,18 +6,14 @@
 -include_lib("arweave/include/ar_rating.hrl").
 
 -export([
-	join/1,
-	rejoin/1,
-	check_requests_MA/1,
-	check_requests_bonuses/1,
-	check_requests_penalties/1,
-	check_ban_and_limit/1,
-	check_peer_lifespan/1
+	peer_join_leave_rejoin/1
+
 ]).
 
-join(_Config) ->
-	check_join(),
-	{state, _Joined, _Peers, _Options, _Resp, _Rates, RatingDB} = sys:get_state(ar_rating),
+peer_join_leave_rejoin(_Config) ->
+	{state, false, _Options, _Changed, _Rates, _Triggers, RatingDB} = sys:get_state(ar_rating),
+	true = check_network_join(),
+	{state, true, _Options, _Changed, _Rates, _Triggers, RatingDB} = sys:get_state(ar_rating),
 	Peer = peer1,
 	case ar_kv:get(RatingDB, term_to_binary(Peer)) of
 		not_found ->
@@ -32,7 +28,7 @@ join(_Config) ->
 	ok = ar_events:send(peer, {joined, Peer}),
 	% just to make sure if this message processed
 	timer:sleep(200),
-	case ar_kv:get(RatingDB, term_to_binary(Peer)) of
+	Rating = case ar_kv:get(RatingDB, term_to_binary(Peer)) of
 		not_found ->
 			ct:fail("Peer is not found");
 		{ok, _} ->
@@ -42,75 +38,72 @@ join(_Config) ->
 		WTF2 ->
 			ct:fail("WTF ~p", [WTF2])
 	end,
-
-	{state, _Joined1, Peers, _Options1, _Resp1, _Rates, _DB1} = sys:get_state(ar_rating),
-	case maps:get(Peer, Peers, unknown) of
-		unknown ->
-			ct:fail("Peer is not found in the rating' state");
-		_ ->
-			ok
+	case ets:lookup(ar_rating, {peer, Peer}) of
+		[] ->
+			ct:fail("Peer is not found");
+		[{_, _}] ->
+			ok;
+		WTF3 ->
+			ct:fail("expecting {Rating, History}. got ~p", [WTF3])
 	end,
-	ok.
 
 
-rejoin(_Config) ->
 	% restart ar_rating process to clear the state
-	exit(whereis(ar_rating), kill),
+	gen_server:stop(ar_rating),
 	% wait a bit.
 	timer:sleep(100),
-	check_join(),
-	Peer = peer1,
-	{state, _Joined, Peers, _Options, _Resp, RatingDB} = sys:get_state(ar_rating),
-	case ar_kv:get(RatingDB, term_to_binary(Peer)) of
+	% ets table should belongs to the supervisor so this restart shouldnt
+	% affect it
+	case ets:lookup(ar_rating, {peer, Peer}) of
+		[] ->
+			ct:fail("Peer is not found");
+		[{_, _}] ->
+			ok;
+		WTF4 ->
+			ct:fail("expecting {Rating, History}. got ~p", [WTF4])
+	end,
+	% restarting process shouldn't affect 'joined' state.
+	{state, true, _Options1, _Changed1, _Rates1, _Triggers1, RatingDB1} = sys:get_state(ar_rating),
+	% test peer leaving
+	ok = ar_events:send(peer, {left, Peer}),
+	timer:sleep(100),
+	case ets:lookup(ar_rating, {peer, Peer}) of
+		[] ->
+			ok;
+		[{_, _}] ->
+			ct:fail("Peer is still there");
+		WTF5 ->
+			ct:fail("expecting empty list. got ~p", [WTF5])
+	end,
+	ok = ar_events:send(peer, {joined, Peer}),
+	timer:sleep(100),
+	% Rating value should be the same as it was before the leaving
+	% (this value was assigned earlier. see code above)
+	Rating = case ar_kv:get(RatingDB1, term_to_binary(Peer)) of
 		not_found ->
 			ct:fail("Peer is not found");
 		{ok, _} ->
 			ok;
-		{error, E2} ->
-			ct:fail("Something went wrong ~p", [E2]);
-		WTF2 ->
-			ct:fail("WTF ~p", [WTF2])
-	end,
-	case maps:get(Peer, Peers, unknown) of
-		unknown ->
-			ok;
-		_ ->
-			ct:fail("is ar_rating restarted? state hasn't cleared up")
-	end,
-	ok = ar_events:send(peer, {joined, Peer}),
-	% just to make sure if this message processed
-	timer:sleep(200),
-	{state, _Joined1, Peers1, _Options1, _Resp1, _DB1} = sys:get_state(ar_rating),
-	case maps:get(Peer, Peers1, unknown) of
-		unknown ->
-			ct:fail("Peer is not found in the rating' state");
-		_ ->
-			ok
-	end,
-	ok.
+		{error, E3} ->
+			ct:fail("Something went wrong ~p", [E3]);
+		WTF6 ->
+			ct:fail("WTF ~p", [WTF6])
+	end.
 
-check_requests_MA(_Config) ->
-	ok.
-check_requests_bonuses(_Config) ->
-	ok.
-check_requests_penalties(_Config) ->
-	ok.
-check_ban_and_limit(_Config) ->
-	ok.
-check_peer_lifespan(_Config) ->
-	ok.
 
 %% Private functions
 
-check_join() ->
-	{state, Joined, _Peers, _Options, _Resp, _RatingDB} = sys:get_state(ar_rating),
-	check_join(Joined).
-check_join(false) ->
+check_network_join() ->
+	{state, Joined, _Options, _Changed, _Rates, _Triggers, _RatingDB} = sys:get_state(ar_rating),
+	check_network_join(Joined).
+check_network_join(false) ->
 	% emulate event that we joined to the arweave network. otherwise everything
 	% will be ignored
 	ar_events:send(network, joined),
 	% should be enough
-	timer:sleep(100);
-check_join(true) ->
-	ok.
+	timer:sleep(100),
+	{state, Joined, _Options, _Changed, _Rates, _Triggers, _RatingDB} = sys:get_state(ar_rating),
+	Joined;
+check_network_join(true) ->
+	true.
 

@@ -193,11 +193,17 @@ start_link() ->
 %% @end
 %%--------------------------------------------------------------------
 init([]) ->
-	process_flag(trap_exit, true),
 	{ok, Ref} = ar_kv:open("ratings"),
 	ar_events:subscribe([network, peer, blocks, txs, chunks, attack]),
 	erlang:send_after(?COMPUTE_RATING_PERIOD, ?MODULE, {'$gen_cast', compute_ratings}),
-	{ok, #state{db = Ref}}.
+	% having at least 1 record means this process has been restarted (due to process fail)
+	% and we already joined to the arweave network
+	case ets:info(?MODULE, size) of
+		0 ->
+			{ok, #state{db = Ref}};
+		_ ->
+			{ok, #state{db = Ref, joined = true}}
+	end.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -285,71 +291,77 @@ handle_info({event, peer, {Act, Kind, Request}}, State)
 		_ when Rate == 0 ->
 			% do nothing.
 			{noreply, State};
-		[{Rating, History}] when Act == attack ->
+		[{_, Rating}] when Act == attack ->
 			T = os:system_time(second),
-			{_ExtraRate, History1} = trigger(Trigger, Peer, History, T),
+			{_ExtraRate, _} = trigger(Trigger, Peer, [], T),
 			Rating1 = Rating#rating{
-				base_bonus = {Rating#rating.base_bonus + Rate, History1},
+				base_bonus = Rating#rating.base_bonus + Rate,
 				last_update = T
 			},
 			ets:insert(?MODULE, {{peer, Peer}, Rating1}),
 			update_rating(Peer, State#state.db),
 			{noreply, State};
-		[{Rating, History}] when Act == push, Rate-Time > 0  ->
+		[{_, Rating}] when Act == push, Rate-Time > 0  ->
 			T = os:system_time(second),
+			{Bonus, History} = Rating#rating.push_bonus,
 			{ExtraRate, History1} = trigger(Trigger, Peer, History, T),
 			Rating1 = Rating#rating{
-				push_bonus = {Rating#rating.push_bonus + Rate - Time + ExtraRate, History1},
+				push_bonus = {Bonus + Rate - Time + ExtraRate, History1},
 				last_update = T
 			},
 			ets:insert(?MODULE, {{peer, Peer}, Rating1}),
 			PeersGotChanges = maps:put(Peer, true, State#state.peers_got_changes),
 			{noreply, State#state{peers_got_changes = PeersGotChanges}};
-		[{Rating, History}] when Act == push ->
+		[{_, Rating}] when Act == push ->
 			T = os:system_time(second),
+			{Penalty, History} = Rating#rating.push_penalty,
 			{ExtraRate, History1} = trigger(Trigger, Peer, History, T),
 			Rating1 = Rating#rating{
-				push_penalty = {Rating#rating.push_penalty + Rate - Time + ExtraRate, History1},
+				push_penalty = {Penalty + Rate - Time + ExtraRate, History1},
 				last_update = T
 			},
 			ets:insert(?MODULE, {{peer, Peer}, Rating1}),
 			PeersGotChanges = maps:put(Peer, true, State#state.peers_got_changes),
 			{noreply, State#state{peers_got_changes = PeersGotChanges}};
-		[{Rating, History}] when Act == response, Rate-Time > 0  ->
+		[{_, Rating}] when Act == response, Rate-Time > 0  ->
 			T = os:system_time(second),
+			{Bonus, History} = Rating#rating.resp_bonus,
 			{ExtraRate, History1} = trigger(Trigger, Peer, History, T),
 			Rating1 = Rating#rating{
-				resp_bonus = {Rating#rating.resp_bonus + Rate - Time + ExtraRate, History1},
+				resp_bonus = {Bonus + Rate - Time + ExtraRate, History1},
 				last_update = T
 			},
 			ets:insert(?MODULE, {{peer, Peer}, Rating1}),
 			PeersGotChanges = maps:put(Peer, true, State#state.peers_got_changes),
 			{noreply, State#state{peers_got_changes = PeersGotChanges}};
-		[{Rating, History}] when Act == response ->
+		[{_, Rating}] when Act == response ->
 			T = os:system_time(second),
+			{Penalty, History} = Rating#rating.resp_penalty,
 			{ExtraRate, History1} = trigger(Trigger, Peer, History, T),
 			Rating1 = Rating#rating{
-				resp_penalty = {Rating#rating.resp_penalty + Time - Rate + ExtraRate, History1},
+				resp_penalty = {Penalty + Time - Rate + ExtraRate, History1},
 				last_update = T
 			},
 			ets:insert(?MODULE, {{peer, Peer}, Rating1}),
 			PeersGotChanges = maps:put(Peer, true, State#state.peers_got_changes),
 			{noreply, State#state{peers_got_changes = PeersGotChanges}};
-		[{Rating, History}] when Act == request, Rate > 0  ->
+		[{_, Rating}] when Act == request, Rate > 0  ->
 			T = os:system_time(second),
+			{Bonus, History} = Rating#rating.req_bonus,
 			{ExtraRate, History1} = trigger(Trigger, Peer, History, T),
 			Rating1 = Rating#rating{
-				req_bonus = {Rating#rating.req_bonus + Rate + ExtraRate, History1},
+				req_bonus = {Bonus + Rate + ExtraRate, History1},
 				last_update = T
 			},
 			ets:insert(?MODULE, {{peer, Peer}, Rating1}),
 			PeersGotChanges = maps:put(Peer, true, State#state.peers_got_changes),
 			{noreply, State#state{peers_got_changes = PeersGotChanges}};
-		[{Rating, History}] when Act == request ->
+		[{_, Rating}] when Act == request ->
 			T = os:system_time(second),
+			{Penalty, History} = Rating#rating.req_penalty,
 			{ExtraRate, History1} = trigger(Trigger, Peer, History, T),
 			Rating1 = Rating#rating{
-				req_penalty = {Rating#rating.req_penalty + Rate + ExtraRate, History1},
+				req_penalty = {Penalty + Rate + ExtraRate, History1},
 				last_update = T
 			},
 			ets:insert(?MODULE, {{peer, Peer}, Rating1}),
@@ -360,11 +372,11 @@ handle_info({event, peer, {Act, Kind, Request}}, State)
 % just got a new peer
 handle_info({event, peer, {joined, Peer}}, State) ->
 	% check whether we had a peering with this Peer
-	Bin = term_to_binary(Peer),
-	Rating = case ar_kv:get(State#state.db, Bin) of
+	BinPeer = term_to_binary(Peer),
+	Rating= case ar_kv:get(State#state.db, BinPeer) of
 		not_found ->
 			R = #rating{},
-			ok = ar_kv:put(State#state.db, Bin, term_to_binary(R)),
+			ok = ar_kv:put(State#state.db, BinPeer, term_to_binary(R)),
 			R;
 		{ok, R} ->
 			binary_to_term(R)
@@ -424,23 +436,32 @@ update_rating(Peer, DB) ->
 	case ets:lookup(?MODULE, {peer, Peer}) of
 		[] ->
 			ok;
-		Rating ->
+		[{_, Rating}] ->
 			% Compute age in days
 			Age = (os:system_time(second) - Rating#rating.since)/(60*60*24),
 			% The influence is getting close to 1 during the time. Division by 3 makes
 			% this value much close to 1 in around 10 days. Increasing divider makes
 			% this transition longer.
 			Influence = (1/-math:exp(Age/3))+1,
-			R = Rating#rating.base_bonus +
-				Rating#rating.resp_bonus +
-				Rating#rating.resp_penalty +
-				Rating#rating.req_bonus +
-				Rating#rating.req_penalty +
-				Rating#rating.push_bonus +
-				Rating#rating.push_penalty,
+			BaseBonus = Rating#rating.base_bonus,
+			{RespBonus,_} = Rating#rating.resp_bonus,
+			{RespPenalty,_} = Rating#rating.resp_penalty,
+			{RequestBonus,_} = Rating#rating.req_bonus,
+			{RequestPenalty,_} = Rating#rating.req_penalty,
+			{PushBonus,_} = Rating#rating.push_bonus,
+			{PushPenalty,_} = Rating#rating.push_penalty,
+			R = BaseBonus +
+				RespBonus +
+				RespPenalty +
+				RequestBonus +
+				RequestPenalty +
+				PushBonus +
+				PushPenalty,
 			Rating1 = Rating#rating{r = trunc(R * Influence)},
-			ar_kv:put(DB, Peer, Rating1),
-			ets:insert(?MODULE, {{peer, Peer}, Rating})
+			BinPeer = term_to_binary(Peer),
+			BinRating = term_to_binary(Rating1),
+			ar_kv:put(DB, BinPeer, BinRating),
+			ets:insert(?MODULE, {{peer, Peer}, Rating1})
 	end.
 
 trigger(undefined, _Peer, History, _T) ->
