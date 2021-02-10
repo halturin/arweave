@@ -6,7 +6,8 @@
 -include_lib("arweave/include/ar_rating.hrl").
 
 -export([
-	peer_join_leave_rejoin/1
+	peer_join_leave_rejoin/1,
+	check_triggers/1
 
 ]).
 
@@ -89,6 +90,9 @@ peer_join_leave_rejoin(_Config) ->
 		WTF6 ->
 			ct:fail("WTF ~p", [WTF6])
 	end.
+
+check_triggers(_Config) ->
+	ok.
 
 
 %% Private functions

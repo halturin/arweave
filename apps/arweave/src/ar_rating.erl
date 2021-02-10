@@ -57,6 +57,7 @@
 	get_banned/0
 ]).
 
+
 -include_lib("arweave/include/ar_rating.hrl").
 -include_lib("arweave/include/ar.hrl").
 -include_lib("arweave/include/ar_config.hrl").
@@ -466,7 +467,6 @@ update_rating(Peer, DB) ->
 
 trigger(undefined, _Peer, History, _T) ->
 	{0, History};
-% {30, 3600, bonus, 500}
 
 trigger({_N, _P, _, _V}, Peer, [H|_] = History, T) when H > T ->
 	% The last timestamp was added to the History is in the future (more
@@ -486,9 +486,9 @@ trigger({N, P, Trigger, V}, Peer, History, T) ->
 	Period = T - lists:nth(N, History1),
 	case Period > P of
 		true when length(History1) > N ->
-			{0, lists:sublist(History1, N)};
+			{V, lists:sublist(History1, N)};
 		true ->
-			{0, History1};
+			{V, History1};
 		_ when Trigger == ban ->
 			% for 'ban' the value of V is in minutes
 			BanPeriod = V*60,
@@ -504,3 +504,45 @@ trigger({N, P, Trigger, V}, Peer, History, T) ->
 			{0, History1}
 	end.
 
+%%
+%% Unit-tests
+%%
+
+-include_lib("eunit/include/eunit.hrl").
+
+trigger_undefined_test() ->
+	?assertMatch(
+		{0, [1]},
+		trigger(undefined, peer1, [1], 1)
+	).
+trigger_banned_test() ->
+	[
+	 ?assertMatch(
+		{0, [5]},
+		trigger({1, 1, test, 8}, 0, [5], 4)
+	 ),
+	 ?assertMatch(
+		{0, [5,4,3,2,1]},
+		trigger({1, 1, test, 8}, 0, [5,4,3,2,1], 4)
+	 )
+	].
+trigger_empty_test() ->
+	?assertMatch(
+		{0, [3]},
+		trigger({2, 1, test, 8}, peer1, [], 3)
+	).
+trigger_long_ago_test() ->
+	% when the last event happened longer time ago than given period.
+	% period = 4
+	% current T = 12
+	?assertMatch(
+		{0, [12]},
+		trigger({2, 4, test, 0}, peer1, [5,4,3,2,1], 12)
+	).
+trigger_cut_the_tail_events_test() ->
+	% cut the tail of event list if it doesnt exceed the given limit
+	% of events for the given period
+	?assertMatch(
+		{0, [26,25,20]},
+		trigger({3, 4, test, 0}, peer1, [25,20,15,10,5,1], 26)
+	).
