@@ -70,54 +70,74 @@
 	r = 0,
 	% Keep the date of starting this peering.
 	since = os:system_time(second),
-	% Just a basic level of trust for the newbies (or respawned peering).
-	base_bonus = 1000,
-	% Bonus and penalties for the responses from the peer. Keep the last
-	% N timestamps of this event in order to call a trigger if this event
-	% happend N times during the given period of time.
-	resp_bonus = {0, []},
-	resp_penalty = {0, []},
-	% ... for the requests for any kind of information (chunks, blocks, etc...)
-	req_bonus = {0, []},
-	req_penalty = {0, []},
-	% ... for the sharing txs,blocks with our node
-	push_bonus = {0, []},
-	push_penalty = {0, []},
+	% rate group keeps the accumulated value of rated action which
+	% is defined in 'rates' map.
+	% Key:
+	%   is the tuple with two values
+	%   {Act, Positive}
+	% 	Act - is the first value of a key tuple in the rates map
+	% 	Positive - true or false.
+	% Value:
+	%   tuple with two values
+	%   {N, History}
+	%   N - accumulated value
+	%   History - list of timestamps
+	% example: {response, false} => {-123, [1613147757, 1613147333]}
+	rate_group = #{},
 	% when it was last time updated
 	last_update = os:system_time(second)
 }).
 
+-define(BASE_SHIFT, 32).
+-define(CLEAR(X), ((1 bsl ?BASE_SHIFT - 1) band X)).
+% variative values
+-define(MINUS_TIME, (1 bsl ?BASE_SHIFT)).
+-define(PLUS_TIME, (1 bsl (?BASE_SHIFT+1))).
+% if you want to add yet another variative value
+% you should define it here like:
+% 	-define(YET_ANOTHER1, (1 bsl (?BASE_SHIFT+2))).
+% 	-define(YET_ANOTHER2, (1 bsl (?BASE_SHIFT+3))).
+
+-define(RATE(X, T), begin
+	?CLEAR(X)
+ 	- T*(X band ?MINUS_TIME bsr ?BASE_SHIFT)
+ 	+ T*(X band ?PLUS_TIME bsr (?BASE_SHIFT+1))
+	% Don't forget to add YET_ANOTHER1 and YET_ANOTHER2 here
+	% using the same way like
+	%	+ V/(X band ?YET_ANOTHER1 bsr (?BASE_SHIFT + 2))
+	%	- V*(X band ?YET_ANOTHER2 bsr (?BASE_SHIFT + 3))
+	% And for sure, V should be added as an argument
+	%	-define(RATE(X, T, V), begin...
+	end).
+
 %% Internal state definition.
 -record(state, {
-	% are we connected to the arweave network?
+	% Are we connected to the arweave network?
 	joined = false,
-	% Set of options how we should compute and keep the rating
-	options = #{
-		% Period of time we should count requests (in sec) in order
-		% to compute value Request per Period
-		request_time_period => 60,
 
-		% 'starter pack' for the new comming peers
-		base_bonus => 1000
-	},
-	% recompute ratings for the peers who got updates
-	% and write them into the DB
+	% Recompute ratings for the peers who got updates
+	% and write them into the RocksDB
 	peers_got_changes = #{},
 
-
-
+	% Rating map defines rate for the action.
+	% Key must be a tuple with two values
+	% 	{Action, ActionType}
+	% Value just a number. Use macro definition along with 'bor' operator
+	% to enable variative value.
+	% 	MINUS_TIME - result will be decreased on a number of ms
+	% 	PLUS_TIME - result will be increased on a number of ms
 	rates = #{
 		% bonuses
 		{request, tx} => 10,
 		{request, block} => 20,
 		{request, chunk} => 30,
 		% Rate for the push/response = Bonus - T (in ms). longer time could make this value negative
-		{push, tx} => 1000,
-		{push, block} => 2000,
-		{response, tx} => 1000,
-		{response, block} => 2000,
-		{response, chunk} => 3000,
-		{response, any} => 1000,
+		{push, tx} => 1000 bor ?MINUS_TIME,
+		{push, block} => 2000 bor ?MINUS_TIME,
+		{response, tx} => 1000 bor ?MINUS_TIME,
+		{response, block} => 2000 bor ?MINUS_TIME,
+		{response, chunk} => 3000 bor ?MINUS_TIME,
+		{response, any} => 1000 bor ?MINUS_TIME,
 		% penalties
 		{request, malformed} => -1000,
 		{response, malformed} => -10000,
@@ -126,6 +146,11 @@
 		{response, not_found} => -500,
 		{push, malformed} => -10000,
 		{attack, any} => -10000
+		% after defining a new variative value you can use it here
+		% {example, a} => 100 bor ?YET_ANOTHER1
+		% {example, b} => 200 bor ?YET_ANOTHER2
+		% or along with the other variatives
+		% {example, c} => 200 bor ?YET_ANOTHER2 bor ?MINUS_TIME
 	},
 
 	% Call Trigger(Value) if event happend N times during period P(in sec).
@@ -222,12 +247,6 @@ init([]) ->
 %%--------------------------------------------------------------------
 handle_call({get_rating, _Peer}, _From, State) ->
 	{reply, 1, State};
-handle_call({set, Option, Value}, _From, State) ->
-	Options = maps:put(Option, Value, State#state.options),
-	{reply, ok, State#state{options = Options}};
-handle_call({get, Option}, _From, State) ->
-	Value = maps:get(Option, State#state.options, unknown),
-	{reply, Value, State};
 handle_call(Request, _From, State) ->
 	?LOG_ERROR([{event, unhandled_call}, {message, Request}]),
 	{reply, ok, State}.
@@ -277,92 +296,31 @@ handle_info({event, network, joined}, State) ->
 handle_info({event, network, left}, State) ->
 	{noreply, State#state{joined = false}};
 
-% requests from the peer
 handle_info({event, peer, {Act, Kind, Request}}, State)
 	when is_record(Request, event_peer) ->
 	Peer = Request#event_peer.peer,
-	Rate = maps:get({Act, Kind}, State#state.rates, 0),
-	Trigger = maps:get({Act, Kind}, State#state.triggers, undefined),
-	% Decrease Rate on a Time value - longest response whould get lowest rate.
-	% In case of negative - count it as a penalty
 	Time = Request#event_peer.time,
+	Rate = ?RATE(maps:get({Act, Kind}, State#state.rates, 0),
+				 Time
+				 % if a new variative value was defined it should be
+				 % added here as an argument
+				),
+	Trigger = maps:get({Act, Kind}, State#state.triggers, undefined),
+	T = os:system_time(second),
 	case ets:lookup(?MODULE, {peer, Peer}) of
 		[] ->
 			{noreply, State};
 		_ when Rate == 0 ->
 			% do nothing.
 			{noreply, State};
-		[{_, Rating}] when Act == attack ->
-			T = os:system_time(second),
-			{_ExtraRate, _} = trigger(Trigger, Peer, [], T),
-			Rating1 = Rating#rating{
-				base_bonus = Rating#rating.base_bonus + Rate,
-				last_update = T
-			},
-			ets:insert(?MODULE, {{peer, Peer}, Rating1}),
-			update_rating(Peer, State#state.db),
-			{noreply, State};
-		[{_, Rating}] when Act == push, Rate-Time > 0  ->
-			T = os:system_time(second),
-			{Bonus, History} = Rating#rating.push_bonus,
+		[{_, Rating}] ->
+			Positive = Rate > 0,
+			{R, History} = maps:get({Act, Positive}, Rating#rating.rate_group, {0, []}),
 			{ExtraRate, History1} = trigger(Trigger, Peer, History, T),
+			R1 = R + Rate + ExtraRate,
+			RG = maps:put({Act, Positive}, {R1, History1}, Rating#rating.rate_group),
 			Rating1 = Rating#rating{
-				push_bonus = {Bonus + Rate - Time + ExtraRate, History1},
-				last_update = T
-			},
-			ets:insert(?MODULE, {{peer, Peer}, Rating1}),
-			PeersGotChanges = maps:put(Peer, true, State#state.peers_got_changes),
-			{noreply, State#state{peers_got_changes = PeersGotChanges}};
-		[{_, Rating}] when Act == push ->
-			T = os:system_time(second),
-			{Penalty, History} = Rating#rating.push_penalty,
-			{ExtraRate, History1} = trigger(Trigger, Peer, History, T),
-			Rating1 = Rating#rating{
-				push_penalty = {Penalty + Rate - Time + ExtraRate, History1},
-				last_update = T
-			},
-			ets:insert(?MODULE, {{peer, Peer}, Rating1}),
-			PeersGotChanges = maps:put(Peer, true, State#state.peers_got_changes),
-			{noreply, State#state{peers_got_changes = PeersGotChanges}};
-		[{_, Rating}] when Act == response, Rate-Time > 0  ->
-			T = os:system_time(second),
-			{Bonus, History} = Rating#rating.resp_bonus,
-			{ExtraRate, History1} = trigger(Trigger, Peer, History, T),
-			Rating1 = Rating#rating{
-				resp_bonus = {Bonus + Rate - Time + ExtraRate, History1},
-				last_update = T
-			},
-			ets:insert(?MODULE, {{peer, Peer}, Rating1}),
-			PeersGotChanges = maps:put(Peer, true, State#state.peers_got_changes),
-			{noreply, State#state{peers_got_changes = PeersGotChanges}};
-		[{_, Rating}] when Act == response ->
-			T = os:system_time(second),
-			{Penalty, History} = Rating#rating.resp_penalty,
-			{ExtraRate, History1} = trigger(Trigger, Peer, History, T),
-			Rating1 = Rating#rating{
-				resp_penalty = {Penalty + Time - Rate + ExtraRate, History1},
-				last_update = T
-			},
-			ets:insert(?MODULE, {{peer, Peer}, Rating1}),
-			PeersGotChanges = maps:put(Peer, true, State#state.peers_got_changes),
-			{noreply, State#state{peers_got_changes = PeersGotChanges}};
-		[{_, Rating}] when Act == request, Rate > 0  ->
-			T = os:system_time(second),
-			{Bonus, History} = Rating#rating.req_bonus,
-			{ExtraRate, History1} = trigger(Trigger, Peer, History, T),
-			Rating1 = Rating#rating{
-				req_bonus = {Bonus + Rate + ExtraRate, History1},
-				last_update = T
-			},
-			ets:insert(?MODULE, {{peer, Peer}, Rating1}),
-			PeersGotChanges = maps:put(Peer, true, State#state.peers_got_changes),
-			{noreply, State#state{peers_got_changes = PeersGotChanges}};
-		[{_, Rating}] when Act == request ->
-			T = os:system_time(second),
-			{Penalty, History} = Rating#rating.req_penalty,
-			{ExtraRate, History1} = trigger(Trigger, Peer, History, T),
-			Rating1 = Rating#rating{
-				req_penalty = {Penalty + Rate + ExtraRate, History1},
+				rate_group = RG,
 				last_update = T
 			},
 			ets:insert(?MODULE, {{peer, Peer}, Rating1}),
@@ -444,20 +402,9 @@ update_rating(Peer, DB) ->
 			% this value much close to 1 in around 10 days. Increasing divider makes
 			% this transition longer.
 			Influence = (1/-math:exp(Age/3))+1,
-			BaseBonus = Rating#rating.base_bonus,
-			{RespBonus,_} = Rating#rating.resp_bonus,
-			{RespPenalty,_} = Rating#rating.resp_penalty,
-			{RequestBonus,_} = Rating#rating.req_bonus,
-			{RequestPenalty,_} = Rating#rating.req_penalty,
-			{PushBonus,_} = Rating#rating.push_bonus,
-			{PushPenalty,_} = Rating#rating.push_penalty,
-			R = BaseBonus +
-				RespBonus +
-				RespPenalty +
-				RequestBonus +
-				RequestPenalty +
-				PushBonus +
-				PushPenalty,
+			% Sum up all the numbers.
+			R = lists:sum(maps:fold(fun(_,{N,_},A) -> [N|A] end, [], Rating#rating.rate_group)),
+			% Apply Influence and store the result.
 			Rating1 = Rating#rating{r = trunc(R * Influence)},
 			BinPeer = term_to_binary(Peer),
 			BinRating = term_to_binary(Rating1),
@@ -540,9 +487,46 @@ trigger_long_ago_test() ->
 		trigger({2, 4, test, 0}, peer1, [5,4,3,2,1], 12)
 	).
 trigger_cut_the_tail_events_test() ->
-	% cut the tail of event list if it doesnt exceed the given limit
+	% cut the tail of the event list if it didn't exceed the limit
 	% of events for the given period
 	?assertMatch(
 		{0, [26,25,20]},
 		trigger({3, 4, test, 0}, peer1, [25,20,15,10,5,1], 26)
 	).
+
+rate_clear_flags_test() ->
+	R0 = 100,
+	R1 = 200 bor ?PLUS_TIME,
+	R2 = 300 bor ?MINUS_TIME,
+	R3 = 400 bor ?PLUS_TIME bor ?MINUS_TIME,
+	100 = ?CLEAR(R0),
+	200 = ?CLEAR(R1),
+	300 = ?CLEAR(R2),
+	400 = ?CLEAR(R3).
+
+rate_with_enabled_variative_time_test() ->
+	R0 = 100,
+	R1 = 200 bor ?PLUS_TIME,
+	R2 = 300 bor ?MINUS_TIME,
+	R3 = 400 bor ?PLUS_TIME bor ?MINUS_TIME,
+	% rate has no enabled time influence
+	?assertMatch(
+		100, % ?CLEAR(R0),
+		?RATE(R0, 100)
+	),
+	% should be increased by 100
+	?assertMatch(
+		300, % ?CLEAR(R1) + 100,
+		?RATE(R1, 100)
+	),
+	% should be decreased by 500
+	?assertMatch(
+		-200, % ?CLEAR(R2) - 500,
+		?RATE(R2, 500)
+	),
+	% shouldn't be affected
+	?assertMatch(
+		400, % ?CLEAR(R3),
+		?RATE(R3, 100)
+	).
+
