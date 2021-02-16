@@ -183,19 +183,19 @@ destroy(Name) ->
 select(DB, Filter) when is_function(Filter, 2) ->
 	case rocksdb:iterator(DB, [{total_order_seek, true}]) of
 		{ok, Iterator} ->
-			select_iterator(Iterator, Filter, #{});
+			select_iterator(Iterator, Filter, #{}, first);
 		E ->
 			{error, E}
 	end.
-select_iterator(Iterator, Filter, Result) ->
-	case rocksdb:iterator_move(Iterator, next) of
+select_iterator(Iterator, Filter, Result, Cmd) ->
+	case rocksdb:iterator_move(Iterator, Cmd) of
 		{ok, Key, Value} ->
 			case Filter(Key, Value) of
 				true ->
 					Result1 = maps:put(Key, Value, Result),
-					select_iterator(Iterator, Filter, Result1);
+					select_iterator(Iterator, Filter, Result1, next);
 				_ ->
-					select_iterator(Iterator, Filter, Result)
+					select_iterator(Iterator, Filter, Result, next)
 			end;
 		_ ->
 			Result

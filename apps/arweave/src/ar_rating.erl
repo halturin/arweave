@@ -52,9 +52,10 @@
 
 -export([
 	get/1,
-	set_option/2,
-	get_option/1,
-	get_banned/0
+	get_banned/0,
+	get_top/1,
+	rate_with_flags/3,
+	get_top_joined/1
 ]).
 
 
@@ -63,52 +64,6 @@
 -include_lib("arweave/include/ar_config.hrl").
 
 -define(COMPUTE_RATING_PERIOD, 60000).
-
-% This record is using as a data structure for the 'rating' database (RocksDB)
--record(rating, {
-	% rating value
-	r = 0,
-	% Keep the date of starting this peering.
-	since = os:system_time(second),
-	% rate group keeps the accumulated value of rated action which
-	% is defined in 'rates' map.
-	% Key:
-	%   is the tuple with two values
-	%   {Act, Positive}
-	% 	Act - is the first value of a key tuple in the rates map
-	% 	Positive - true or false.
-	% Value:
-	%   tuple with two values
-	%   {N, History}
-	%   N - accumulated value
-	%   History - list of timestamps
-	% example: {response, false} => {-123, [1613147757, 1613147333]}
-	rate_group = #{},
-	% when it was last time updated
-	last_update = os:system_time(second)
-}).
-
--define(BASE_SHIFT, 32).
--define(CLEAR(X), ((1 bsl ?BASE_SHIFT - 1) band X)).
-% variative values
--define(MINUS_TIME, (1 bsl ?BASE_SHIFT)).
--define(PLUS_TIME, (1 bsl (?BASE_SHIFT+1))).
-% if you want to add yet another variative value
-% you should define it here like:
-% 	-define(YET_ANOTHER1, (1 bsl (?BASE_SHIFT+2))).
-% 	-define(YET_ANOTHER2, (1 bsl (?BASE_SHIFT+3))).
-
--define(RATE(X, T), begin
-	?CLEAR(X)
- 	- T*(X band ?MINUS_TIME bsr ?BASE_SHIFT)
- 	+ T*(X band ?PLUS_TIME bsr (?BASE_SHIFT+1))
-	% Don't forget to add YET_ANOTHER1 and YET_ANOTHER2 here
-	% using the same way like
-	%	+ V/(X band ?YET_ANOTHER1 bsr (?BASE_SHIFT + 2))
-	%	- V*(X band ?YET_ANOTHER2 bsr (?BASE_SHIFT + 3))
-	% And for sure, V should be added as an argument
-	%	-define(RATE(X, T, V), begin...
-	end).
 
 %% Internal state definition.
 -record(state, {
@@ -119,7 +74,7 @@
 	% and write them into the RocksDB
 	peers_got_changes = #{},
 
-	% Rating map defines rate for the action.
+	% Rating map defines a rate for the action.
 	% Key must be a tuple with two values
 	% 	{Action, ActionType}
 	% Value just a number. Use macro definition along with 'bor' operator
@@ -127,17 +82,17 @@
 	% 	MINUS_TIME - result will be decreased on a number of ms
 	% 	PLUS_TIME - result will be increased on a number of ms
 	rates = #{
-		% bonuses
+		% bonuses for incoming requests
 		{request, tx} => 10,
 		{request, block} => 20,
 		{request, chunk} => 30,
 		% Rate for the push/response = Bonus - T (in ms). longer time could make this value negative
-		{push, tx} => 1000 bor ?MINUS_TIME,
-		{push, block} => 2000 bor ?MINUS_TIME,
-		{response, tx} => 1000 bor ?MINUS_TIME,
-		{response, block} => 2000 bor ?MINUS_TIME,
-		{response, chunk} => 3000 bor ?MINUS_TIME,
-		{response, any} => 1000 bor ?MINUS_TIME,
+		{push, tx} => {1000, set_flags([?MINUS_TIME])},
+		{push, block} => {2000, set_flags([?MINUS_TIME])},
+		{response, tx} => {1000, set_flags([?MINUS_TIME])},
+		{response, block} => {2000, set_flags([?MINUS_TIME])},
+		{response, chunk} => {3000, set_flags([?MINUS_TIME])},
+		{response, any} => {1000, set_flags([?MINUS_TIME])},
 		% penalties
 		{request, malformed} => -1000,
 		{response, malformed} => -10000,
@@ -146,7 +101,7 @@
 		{response, not_found} => -500,
 		{push, malformed} => -10000,
 		{attack, any} => -10000
-		% after defining a new variative value you can use it here
+		% after defenition of a new variative value you can use it here
 		% {example, a} => 100 bor ?YET_ANOTHER1
 		% {example, b} => 200 bor ?YET_ANOTHER2
 		% or along with the other variatives
@@ -154,8 +109,8 @@
 	},
 
 	% Call Trigger(Value) if event happend N times during period P(in sec).
-	% {act, kind} => {N, P, Trigger, Value}.
-	% Triggering call happens if it has a rate with the same name {act, kind}.
+	% {Action, ActionType} => {N, P, Trigger, Value}.
+	% Triggering call happens if it has a rate with the same key name {Action, ActionType}.
 	% Otherwise it will be ignored.
 	triggers = #{
 		% If we got 30 blocks during last hour from the same peer
@@ -184,15 +139,58 @@
 %%% API
 %%%===================================================================
 get(Peer) ->
-	gen_server:call(?MODULE, {get_rating, Peer}).
-get_banned() ->
-	%
-	[].
+	case ets:lookup(?MODULE, {peer, Peer}) of
+		[] ->
+			BinPeer = term_to_binary(Peer),
+			DB = gen_server:call(?MODULE, get_db),
+			case ar_kv:get(DB, BinPeer) of
+				not_found ->
+					undefined;
+				{ok, RatingBin} ->
+					Rating = binary_to_term(RatingBin),
+					{Rating#rating.r, Rating#rating.host, Rating#rating.port}
+			end;
+		[{_, Rating}] ->
+					{Rating#rating.r, Rating#rating.host, Rating#rating.port}
+	end.
 
-set_option(Option, Value) ->
-	gen_server:call(?MODULE, {set, Option, Value}).
-get_option(Option) ->
-	gen_server:call(?MODULE, {get, Option}).
+get_banned() ->
+	DB = gen_server:call(?MODULE, get_db),
+	% get all but not banned
+	T = os:system_time(second),
+	Filter = fun(_,RatingBin) ->
+				% exclude banned peers
+				Rating = binary_to_term(RatingBin),
+				Rating#rating.ban > T
+			 end,
+	MapAllBin = ar_kv:select(DB, Filter),
+	maps:fold(fun(K,V,A) ->
+						Rating = binary_to_term(V),
+						[{binary_to_term(K), Rating#rating.r} | A]
+					end, [], MapAllBin).
+
+get_top(N) ->
+	DB = gen_server:call(?MODULE, get_db),
+	% get all but not banned
+	T = os:system_time(second),
+	Filter = fun(_,RatingBin) ->
+				% exclude banned peers
+				Rating = binary_to_term(RatingBin),
+				Rating#rating.ban < T
+			 end,
+
+	MapAllBin = ar_kv:select(DB, Filter),
+	All = maps:fold(fun(K,V,A) ->
+						Rating = binary_to_term(V),
+						[{binary_to_term(K), Rating#rating.r} | A]
+					end, [], MapAllBin),
+	Sorted = lists:sort(fun({_, AR}, {_, BR}) ->
+				AR > BR
+			   end, All),
+	lists:sublist(Sorted, N).
+
+get_top_joined(N) ->
+	lists:sublist([], N).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -245,8 +243,8 @@ init([]) ->
 %%									 {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_call({get_rating, _Peer}, _From, State) ->
-	{reply, 1, State};
+handle_call(get_db, _From, State) ->
+	{reply, State#state.db, State};
 handle_call(Request, _From, State) ->
 	?LOG_ERROR([{event, unhandled_call}, {message, Request}]),
 	{reply, ok, State}.
@@ -300,11 +298,12 @@ handle_info({event, peer, {Act, Kind, Request}}, State)
 	when is_record(Request, event_peer) ->
 	Peer = Request#event_peer.peer,
 	Time = Request#event_peer.time,
-	Rate = ?RATE(maps:get({Act, Kind}, State#state.rates, 0),
-				 Time
-				 % if a new variative value was defined it should be
-				 % added here as an argument
-				),
+	Rate = case maps:get({Act, Kind}, State#state.rates, 0) of
+		{ActRate, Flags} ->
+			rate_with_flags(ActRate, Flags, Time);
+		ActRate ->
+			ActRate
+	end,
 	Trigger = maps:get({Act, Kind}, State#state.triggers, undefined),
 	T = os:system_time(second),
 	case ets:lookup(?MODULE, {peer, Peer}) of
@@ -316,16 +315,31 @@ handle_info({event, peer, {Act, Kind, Request}}, State)
 		[{_, Rating}] ->
 			Positive = Rate > 0,
 			{R, History} = maps:get({Act, Positive}, Rating#rating.rate_group, {0, []}),
-			{ExtraRate, History1} = trigger(Trigger, Peer, History, T),
+			{ExtraRate, [B|_] = History1} = trigger(Trigger, Peer, History, T),
 			R1 = R + Rate + ExtraRate,
 			RG = maps:put({Act, Positive}, {R1, History1}, Rating#rating.rate_group),
-			Rating1 = Rating#rating{
-				rate_group = RG,
-				last_update = T
-			},
-			ets:insert(?MODULE, {{peer, Peer}, Rating1}),
-			PeersGotChanges = maps:put(Peer, true, State#state.peers_got_changes),
-			{noreply, State#state{peers_got_changes = PeersGotChanges}}
+			% chech whether this peer was banned. trigger puts an UntilTime as a head item
+			% in the returned History list for cases if ban was triggered for the given peer.
+			case B > T of
+				true ->
+					% rating of a banned peer should be immidiatelly updated and stored into DB
+					Rating1 = Rating#rating{
+						rate_group = RG,
+						last_update = T,
+						ban = true
+					},
+					ets:insert(?MODULE, {{peer, Peer}, Rating1}),
+					update_rating(Peer, State#state.db);
+				false ->
+					Rating1 = Rating#rating{
+						rate_group = RG,
+						last_update = T,
+						ban = false
+					},
+					ets:insert(?MODULE, {{peer, Peer}, Rating1}),
+					PeersGotChanges = maps:put(Peer, true, State#state.peers_got_changes),
+					{noreply, State#state{peers_got_changes = PeersGotChanges}}
+			end
 	end;
 
 % just got a new peer
@@ -402,7 +416,7 @@ update_rating(Peer, DB) ->
 			% this value much close to 1 in around 10 days. Increasing divider makes
 			% this transition longer.
 			Influence = (1/-math:exp(Age/3))+1,
-			% Sum up all the numbers.
+			% Sum up all the rates.
 			R = lists:sum(maps:fold(fun(_,{N,_},A) -> [N|A] end, [], Rating#rating.rate_group)),
 			% Apply Influence and store the result.
 			Rating1 = Rating#rating{r = trunc(R * Influence)},
@@ -412,7 +426,10 @@ update_rating(Peer, DB) ->
 			ets:insert(?MODULE, {{peer, Peer}, Rating1})
 	end.
 
+
 trigger(undefined, _Peer, History, _T) ->
+	% there is no reason to keep the history if trigger wasn't
+	% defined for the action.
 	{0, History};
 
 trigger({_N, _P, _, _V}, Peer, [H|_] = History, T) when H > T ->
@@ -451,6 +468,21 @@ trigger({N, P, Trigger, V}, Peer, History, T) ->
 			{0, History1}
 	end.
 
+rate_with_flags(X, F, T) ->
+	X
+	- T*is_flag_set(F, ?MINUS_TIME)
+	+ T*is_flag_set(F, ?PLUS_TIME).
+
+set_flags([F]) ->
+	F;
+set_flags([F|Flags]) ->
+	F band set_flags(Flags).
+
+is_flag_set(X, F) ->
+	case  X band F of
+		0 -> 0;
+		_ -> 1
+	end.
 %%
 %% Unit-tests
 %%
@@ -494,39 +526,29 @@ trigger_cut_the_tail_events_test() ->
 		trigger({3, 4, test, 0}, peer1, [25,20,15,10,5,1], 26)
 	).
 
-rate_clear_flags_test() ->
-	R0 = 100,
-	R1 = 200 bor ?PLUS_TIME,
-	R2 = 300 bor ?MINUS_TIME,
-	R3 = 400 bor ?PLUS_TIME bor ?MINUS_TIME,
-	100 = ?CLEAR(R0),
-	200 = ?CLEAR(R1),
-	300 = ?CLEAR(R2),
-	400 = ?CLEAR(R3).
-
 rate_with_enabled_variative_time_test() ->
 	R0 = 100,
-	R1 = 200 bor ?PLUS_TIME,
-	R2 = 300 bor ?MINUS_TIME,
-	R3 = 400 bor ?PLUS_TIME bor ?MINUS_TIME,
+	{R1, F1} = {200, set_flags([?PLUS_TIME])},
+	{R2, F2} = {300, set_flags([?MINUS_TIME])},
+	{R3, F3} = {400, set_flags([?PLUS_TIME, ?MINUS_TIME])},
 	% rate has no enabled time influence
 	?assertMatch(
-		100, % ?CLEAR(R0),
-		?RATE(R0, 100)
+		100,
+		rate_with_flags(R0, 0, 100)
 	),
 	% should be increased by 100
 	?assertMatch(
-		300, % ?CLEAR(R1) + 100,
-		?RATE(R1, 100)
+		300,
+		rate_with_flags(R1, F1, 100)
 	),
 	% should be decreased by 500
 	?assertMatch(
-		-200, % ?CLEAR(R2) - 500,
-		?RATE(R2, 500)
+		-200,
+		rate_with_flags(R2, F2, 500)
 	),
 	% shouldn't be affected
 	?assertMatch(
-		400, % ?CLEAR(R3),
-		?RATE(R3, 100)
+		400,
+		rate_with_flags(R3, F3, 100)
 	).
 
