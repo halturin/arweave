@@ -209,7 +209,37 @@ check_rate_and_triggers(_Config) ->
 			ct:fail("got wrong rating from ets")
 	end,
 
+	% ========================================================================================
+	% CASE trigger 'ban' : peer is already joined, do some requests, catch 'ban' event,
+	% check rating
+	% ========================================================================================
 
+	% make zero rating
+	ets:insert(ar_rating, {{peer, PeerIncReq}, #rating{since = T - 100000}}),
+
+	% ========================================================================================
+	% CASE trigger 'bonus' : peer is already joined, do some requests, catch 'bonus' event,
+	% check rating
+	% ========================================================================================
+
+	% make zero rating
+	ets:insert(ar_rating, {{peer, PeerIncReq}, #rating{since = T - 100000}}),
+
+	% ========================================================================================
+	% CASE trigger 'penalty' : peer is already joined, do some requests, catch 'penalty' event,
+	% check rating
+	% ========================================================================================
+
+	% make zero rating
+	ets:insert(ar_rating, {{peer, PeerIncReq}, #rating{since = T - 100000}}),
+
+	% ========================================================================================
+	% CASE trigger 'offline' : peer is already joined, do some requests, catch 'offline' event,
+	% check rating, check status offline/online
+	% ========================================================================================
+
+	% make zero rating
+	ets:insert(ar_rating, {{peer, PeerIncReq}, #rating{since = T - 100000}}),
 	ok.
 
 check_get_top_n_get_banned(_Config) ->
