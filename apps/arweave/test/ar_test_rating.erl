@@ -106,31 +106,65 @@ check_rate_and_triggers(_Config) ->
 		_ ->
 			ok
 	end,
-	PeerA = peerA,
+	% ========================================================================================
+	% CASE accounting income requests (positive) : join peer, do some requests, check rating
 	% make sure if this peer was joined. otherwise all the events will be ignored
-	ok = ar_events:send(peer, {joined, PeerA, "localhost", 1984}),
+	% ========================================================================================
+	PeerIncReq = peerIncReq,
+	ok = ar_events:send(peer, {joined, PeerIncReq, "localhost", 1984}),
+	timer:sleep(100),
+	% the age of this peer should be enough to make rating be viable. (current
+	% age influence is getting close to 1 in around 10 days
+	T = os:system_time(second),
+	case ets:lookup(ar_rating, {peer, PeerIncReq}) of
+		[{_, Rating1}] ->
+			ets:insert(ar_rating, {{peer, PeerIncReq}, Rating1#rating{since = T - 100000}});
+		_ ->
+			ct:fail("got wrong rating from ets")
+	end,
 	% generate events
 	EventPeer = #event_peer{
-		peer = PeerA,
+		peer = PeerIncReq,
 		time = 0
 	},
-	RateRequestTX = maps:get({request, tx}, Rates, 0),
-	RateRequestBlock = maps:get({request, block}, Rates, 0),
-	RateRequestChunk = maps:get({request, chunk}, Rates, 0),
-	ct:print("~p - ~p - ~p", [RateRequestTX, RateRequestBlock, RateRequestChunk]),
 	ok = ar_events:send(peer, {request, tx, EventPeer}),
 	ok = ar_events:send(peer, {request, block, EventPeer}),
 	ok = ar_events:send(peer, {request, chunk, EventPeer}),
 	timer:sleep(100),
-	gen_server:cast(ar_rating, compute_rating),
+	gen_server:cast(ar_rating, compute_ratings),
 	timer:sleep(100),
-	PeerA_rating = ar_rating:rate(RateRequestTX, 0)
-				+ ar_rating:rate(RateRequestBlock, 0)
-				+ ar_rating:rate(RateRequestChunk, 0),
-	case ets:lookup(ar_rating, {peer, PeerA}) of
-		[{_, Rating}] ->
-			% should be the same
-			PeerA_rating = Rating#rating.r;
+	RateRequestTX = maps:get({request, tx}, Rates, 0),
+	RateRequestBlock = maps:get({request, block}, Rates, 0),
+	RateRequestChunk = maps:get({request, chunk}, Rates, 0),
+	PeerIncReq_rating = ar_rating:rate_with_flags(RateRequestTX, 0)
+				+ ar_rating:rate_with_flags(RateRequestBlock, 0)
+				+ ar_rating:rate_with_flags(RateRequestChunk, 0),
+	case ets:lookup(ar_rating, {peer, PeerIncReq}) of
+		[{_, Rating2}] ->
+			Influence = ar_rating:influence(Rating2),
+			True = trunc(Influence * PeerIncReq_rating) == Rating2#rating.r,
+			True = true;
+		_ ->
+			ct:fail("got wrong rating from ets")
+	end,
+	% ========================================================================================
+	% CASE accounting income requests (negative) : peer is already joined, do some malformed requests,
+	% check rating
+	% ========================================================================================
+
+	% make zero rating
+	ets:insert(ar_rating, {{peer, PeerIncReq}, #rating{since = T - 100000}}),
+	ok = ar_events:send(peer, {request, malformed, EventPeer}),
+	timer:sleep(100),
+	gen_server:cast(ar_rating, compute_ratings),
+	timer:sleep(100),
+	RateMalformedRequest = maps:get({request, malformed}, Rates, 0),
+	PeerIncReqMalformed_rating = ar_rating:rate_with_flags(RateMalformedRequest, 0),
+	case ets:lookup(ar_rating, {peer, PeerIncReq}) of
+		[{_, Rating3}] ->
+			Influence1 = ar_rating:influence(Rating3),
+			True1 = trunc(Influence1 * PeerIncReqMalformed_rating) == Rating3#rating.r,
+			True1 = true;
 		_ ->
 			ct:fail("got wrong rating from ets")
 	end,

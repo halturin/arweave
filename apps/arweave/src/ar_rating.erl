@@ -54,8 +54,9 @@
 	get/1,
 	get_banned/0,
 	get_top/1,
-	rate_with_flags/3,
-	get_top_joined/1
+	rate_with_flags/2,
+	get_top_joined/1,
+	influence/1
 ]).
 
 
@@ -148,10 +149,10 @@ get(Peer) ->
 					undefined;
 				{ok, RatingBin} ->
 					Rating = binary_to_term(RatingBin),
-					{Rating#rating.r, Rating#rating.ban, Rating#rating.host, Rating#rating.port}
+					{Rating#rating.r, Rating#rating.ban, Rating#rating.host, Rating#rating.port, offline}
 			end;
 		[{_, Rating}] ->
-					{Rating#rating.r, Rating#rating.ban, Rating#rating.host, Rating#rating.port}
+					{Rating#rating.r, Rating#rating.ban, Rating#rating.host, Rating#rating.port, online}
 	end.
 
 get_banned() ->
@@ -314,12 +315,8 @@ handle_info({event, peer, {Act, Kind, Request}}, State)
 	when is_record(Request, event_peer) ->
 	Peer = Request#event_peer.peer,
 	Time = Request#event_peer.time,
-	Rate = case maps:get({Act, Kind}, State#state.rates, 0) of
-		{ActRate, Flags} ->
-			rate_with_flags(ActRate, Flags, Time);
-		ActRate ->
-			ActRate
-	end,
+	ActRateFlags = maps:get({Act, Kind}, State#state.rates, 0),
+	Rate = rate_with_flags(ActRateFlags, Time),
 	Trigger = maps:get({Act, Kind}, State#state.triggers, undefined),
 	T = os:system_time(second),
 	case ets:lookup(?MODULE, {peer, Peer}) of
@@ -427,12 +424,10 @@ update_rating(Peer, DB) ->
 		[] ->
 			ok;
 		[{_, Rating}] ->
-			% Compute age in days
-			Age = (os:system_time(second) - Rating#rating.since)/(60*60*24),
 			% The influence is getting close to 1 during the time. Division by 3 makes
 			% this value much close to 1 in around 10 days. Increasing divider makes
 			% this transition longer.
-			Influence = (1/-math:exp(Age/3))+1,
+			Influence = influence(Rating),
 			% Sum up all the rates.
 			R = lists:sum(maps:fold(fun(_,{N,_},A) -> [N|A] end, [], Rating#rating.rate_group)),
 			% Apply Influence and store the result.
@@ -485,10 +480,13 @@ trigger({N, P, Trigger, V}, Peer, History, T) ->
 			{0, History1}
 	end.
 
-rate_with_flags(X, F, T) ->
+rate_with_flags({X, F}, T) ->
 	X
 	- T*is_flag_set(F, ?MINUS_TIME)
-	+ T*is_flag_set(F, ?PLUS_TIME).
+	+ T*is_flag_set(F, ?PLUS_TIME);
+rate_with_flags(X, _T) ->
+	% no flags
+	X.
 
 set_flags([F]) ->
 	F;
@@ -500,6 +498,11 @@ is_flag_set(X, F) ->
 		0 -> 0;
 		_ -> 1
 	end.
+
+influence(Rating) when is_record(Rating, rating) ->
+	% Compute age in days
+	Age = (os:system_time(second) - Rating#rating.since)/(60*60*24),
+	(1/-math:exp(Age/3))+1.
 %%
 %% Unit-tests
 %%
@@ -545,27 +548,27 @@ trigger_cut_the_tail_events_test() ->
 
 rate_with_enabled_variative_time_test() ->
 	R0 = 100,
-	{R1, F1} = {200, set_flags([?PLUS_TIME])},
-	{R2, F2} = {300, set_flags([?MINUS_TIME])},
-	{R3, F3} = {400, set_flags([?PLUS_TIME, ?MINUS_TIME])},
+	R1 = {200, set_flags([?PLUS_TIME])},
+	R2 = {300, set_flags([?MINUS_TIME])},
+	R3 = {400, set_flags([?PLUS_TIME, ?MINUS_TIME])},
 	% rate has no enabled time influence
 	?assertMatch(
 		100,
-		rate_with_flags(R0, 0, 100)
+		rate_with_flags(R0, 100)
 	),
 	% should be increased by 100
 	?assertMatch(
 		300,
-		rate_with_flags(R1, F1, 100)
+		rate_with_flags(R1, 100)
 	),
 	% should be decreased by 500
 	?assertMatch(
 		-200,
-		rate_with_flags(R2, F2, 500)
+		rate_with_flags(R2, 500)
 	),
 	% shouldn't be affected
 	?assertMatch(
 		400,
-		rate_with_flags(R3, F3, 100)
+		rate_with_flags(R3, 100)
 	).
 
