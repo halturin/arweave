@@ -147,6 +147,7 @@ check_rate_and_triggers(_Config) ->
 		_ ->
 			ct:fail("got wrong rating from ets")
 	end,
+
 	% ========================================================================================
 	% CASE accounting income requests (negative) : peer is already joined, do some malformed requests,
 	% check rating
@@ -168,6 +169,47 @@ check_rate_and_triggers(_Config) ->
 		_ ->
 			ct:fail("got wrong rating from ets")
 	end,
+
+	% ========================================================================================
+	% CASE accounting push/response (with time influence) : peer is already joined, do some requests
+	% with different timing, check rating
+	% ========================================================================================
+
+	% make zero rating
+	ets:insert(ar_rating, {{peer, PeerIncReq}, #rating{since = T - 100000}}),
+	EventPeer100 = #event_peer{
+		peer = PeerIncReq,
+		time = 100
+	},
+	EventPeer1000 = #event_peer{
+		peer = PeerIncReq,
+		time = 1000
+	},
+	EventPeer2000 = #event_peer{
+		peer = PeerIncReq,
+		time = 2000
+	},
+	% (1000 - 100) + (1000 - 1000) + (1000 - 2000) = -100 * Influence
+	ok = ar_events:send(peer, {push, tx, EventPeer100}),
+	ok = ar_events:send(peer, {push, tx, EventPeer1000}), % should make bonus = 0 due to long time
+	ok = ar_events:send(peer, {push, tx, EventPeer2000}), % should make bonus negative due to long time
+	timer:sleep(100),
+	gen_server:cast(ar_rating, compute_ratings),
+	timer:sleep(100),
+	RatePushTX = maps:get({push, tx}, Rates, 0),
+	PeerIncReqPushTX_rating = ar_rating:rate_with_flags(RatePushTX, 100)
+								+ ar_rating:rate_with_flags(RatePushTX, 1000)
+								+ ar_rating:rate_with_flags(RatePushTX, 2000),
+	case ets:lookup(ar_rating, {peer, PeerIncReq}) of
+		[{_, Rating4}] ->
+			Influence2 = ar_rating:influence(Rating4),
+			True2 = trunc(Influence2 * PeerIncReqPushTX_rating) == Rating4#rating.r,
+			True2 = true;
+		_ ->
+			ct:fail("got wrong rating from ets")
+	end,
+
+
 	ok.
 
 check_get_top_n_get_banned(_Config) ->

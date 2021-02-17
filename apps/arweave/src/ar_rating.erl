@@ -328,13 +328,13 @@ handle_info({event, peer, {Act, Kind, Request}}, State)
 		[{_, Rating}] ->
 			Positive = Rate > 0,
 			{R, History} = maps:get({Act, Positive}, Rating#rating.rate_group, {0, []}),
-			{ExtraRate, [B|_] = History1} = trigger(Trigger, Peer, History, T),
-			R1 = R + Rate + ExtraRate,
-			RG = maps:put({Act, Positive}, {R1, History1}, Rating#rating.rate_group),
-			% chech whether this peer was banned. trigger puts an UntilTime as a head item
-			% in the returned History list for cases if ban was triggered for the given peer.
-			case B > T of
-				true ->
+			case trigger(Trigger, Peer, History, T) of
+				{ExtraRate, [B|_] = History1} when B > T ->
+					% peer was banned. trigger puts an UntilTime as a head item
+					% in the returned History list for cases if a ban was triggered
+					% for the given peer.
+					R1 = R + Rate + ExtraRate,
+					RG = maps:put({Act, Positive}, {R1, History1}, Rating#rating.rate_group),
 					% rating of a banned peer should be immidiatelly updated and stored into DB
 					Rating1 = Rating#rating{
 						rate_group = RG,
@@ -342,8 +342,11 @@ handle_info({event, peer, {Act, Kind, Request}}, State)
 						ban = true
 					},
 					ets:insert(?MODULE, {{peer, Peer}, Rating1}),
-					update_rating(Peer, State#state.db);
-				false ->
+					update_rating(Peer, State#state.db),
+					{noreply, State};
+				{ExtraRate, History1} ->
+					R1 = R + Rate + ExtraRate,
+					RG = maps:put({Act, Positive}, {R1, History1}, Rating#rating.rate_group),
 					Rating1 = Rating#rating{
 						rate_group = RG,
 						last_update = T,
