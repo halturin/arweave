@@ -32,7 +32,7 @@ peer_join_leave_rejoin(_Config) ->
 		WTF1 ->
 			ct:fail("WTF ~p", [WTF1])
 	end,
-	ok = ar_events:send(peer, {joined, Peer}),
+	ok = ar_events:send(peer, {joined, Peer, "localhost", 1234}),
 	% just to make sure if this message processed
 	timer:sleep(200),
 	Rating = case ar_kv:get(RatingDB, term_to_binary(Peer)) of
@@ -82,7 +82,7 @@ peer_join_leave_rejoin(_Config) ->
 		WTF5 ->
 			ct:fail("expecting empty list. got ~p", [WTF5])
 	end,
-	ok = ar_events:send(peer, {joined, Peer}),
+	ok = ar_events:send(peer, {joined, Peer, "google.com", 8000}),
 	timer:sleep(100),
 	% Rating value should be the same as it was before the leaving
 	% (this value was assigned earlier. see code above)
@@ -108,7 +108,7 @@ check_rate_and_triggers(_Config) ->
 	end,
 	PeerA = peerA,
 	% make sure if this peer was joined. otherwise all the events will be ignored
-	ok = ar_events:send(peer, {joined, PeerA}),
+	ok = ar_events:send(peer, {joined, PeerA, "localhost", 1984}),
 	% generate events
 	EventPeer = #event_peer{
 		peer = PeerA,
@@ -154,7 +154,7 @@ check_get_top_n_get_banned(_Config) ->
 	lists:map(fun({Peer, R, Banned}) ->
 				Ban = case Banned of
 						true ->
-							  os:system_time(second) + 1000;
+							  os:system_time(second) + 10000000;
 						_ ->
 							  0
 					end,
@@ -165,29 +165,43 @@ check_get_top_n_get_banned(_Config) ->
 				ets:insert(ar_rating, {{peer, Peer}, Rating})
 			end, RateSamples),
 
-	% get_top
-	[{peerK,999}] = ar_rating:get_top(1),
+	% insert random data (to ets) to make shure if selected only valid {peer, Peer} values
+	ets:insert(ar_rating, {peer, peerA, #rating{r=999999999}}),
+	ets:insert(ar_rating, {peerA, peer, #rating{r=777777777}}),
+	% ...and add a couple of valid ones into the ets tabe
+	ets:insert(ar_rating, {{peer, peerX}, #rating{ban=0, r=888}}),
+	ets:insert(ar_rating, {{peer, peerY}, #rating{ban=os:system_time(second) + 10000000, r=888}}),
 
-	[{peerK,999}, {peerF,250}, {peerD,200}, {peerA,100},
-	{peerN,99}, {peerH,15}, {peerG,10}] = ar_rating:get_top(7),
+	% get_top (from RocksDB)
+	[{peerK,999,undefined,1984}] = ar_rating:get_top(1),
 
-	[{peerK,999}, {peerF,250}, {peerD,200}, {peerA,100},
-	{peerN,99}, {peerH,15}, {peerG,10}, {peerL,2}, {peerB,1}] = ar_rating:get_top(100),
+	[{peerK,999,undefined,1984}, {peerF,250,undefined,1984}, {peerD,200,undefined,1984},
+	 {peerA,100,undefined,1984}, {peerN,99,undefined,1984}, {peerH,15,undefined,1984},
+	 {peerG,10,undefined,1984}] = ar_rating:get_top(7),
 
-	% get_top_joined
-	%[{peerK,999}] = ar_rating:get_top_joined(1),
+	[{peerK,999,undefined,1984}, {peerF,250,undefined,1984}, {peerD,200,undefined,1984},
+	 {peerA,100,undefined,1984}, {peerN,99,undefined,1984}, {peerH,15,undefined,1984},
+	 {peerG,10,undefined,1984}, {peerL,2,undefined,1984}, {peerB,1,undefined,1984}] = ar_rating:get_top(100),
 
-	%[{peerK,999}, {peerF,250}, {peerD,200}, {peerA,100},
-	%{peerN,99}, {peerH,15}, {peerG,10}] = ar_rating:get_top_joined(7),
+	%
+	% get_top_joined (from ETS)
+	[{peerK,999,undefined,1984}] = ar_rating:get_top_joined(1),
 
-	%[{peerK,999}, {peerF,250}, {peerD,200}, {peerA,100},
-	%{peerN,99}, {peerH,15}, {peerG,10}, {peerL,2}, {peerB,1}] = ar_rating:get_top_joined(100),
+	[{peerK,999,undefined,1984}, {peerX, 888, undefined, 1984}, {peerF,250,undefined,1984},
+	 {peerD,200,undefined,1984}, {peerA,100,undefined,1984}, {peerN,99,undefined,1984},
+	 {peerH,15,undefined,1984} ] = ar_rating:get_top_joined(7),
+
+	[{peerK,999,undefined,1984}, {peerX, 888, undefined, 1984}, {peerF,250,undefined,1984},
+	 {peerD,200,undefined,1984}, {peerA,100,undefined,1984}, {peerN,99,undefined,1984},
+	 {peerH,15,undefined,1984},  {peerG,10,undefined,1984}, {peerL,2,undefined,1984},
+	 {peerB,1,undefined,1984}] = ar_rating:get_top_joined(100),
 
 	% get_banned
-	[{peerM,8},{peerI,1000},{peerE,300},{peerC,1}] = ar_rating:get_banned(),
+	[{peerM,8,undefined,1984},{peerI,1000,undefined,1984},
+	 {peerE,300,undefined,1984},{peerC,1,undefined,1984}] = ar_rating:get_banned(),
 
-	% get peer info {Rating, Host, Port}.
-	{100, undefined, 1984} = ar_rating:get(peerA),
+	% get peer info {Rating, Banned, Host, Port}.
+	{100, 0, undefined, 1984} = ar_rating:get(peerA),
 	ok.
 
 

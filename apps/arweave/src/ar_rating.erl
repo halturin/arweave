@@ -148,10 +148,10 @@ get(Peer) ->
 					undefined;
 				{ok, RatingBin} ->
 					Rating = binary_to_term(RatingBin),
-					{Rating#rating.r, Rating#rating.host, Rating#rating.port}
+					{Rating#rating.r, Rating#rating.ban, Rating#rating.host, Rating#rating.port}
 			end;
 		[{_, Rating}] ->
-					{Rating#rating.r, Rating#rating.host, Rating#rating.port}
+					{Rating#rating.r, Rating#rating.ban, Rating#rating.host, Rating#rating.port}
 	end.
 
 get_banned() ->
@@ -166,7 +166,8 @@ get_banned() ->
 	MapAllBin = ar_kv:select(DB, Filter),
 	maps:fold(fun(K,V,A) ->
 						Rating = binary_to_term(V),
-						[{binary_to_term(K), Rating#rating.r} | A]
+						[{binary_to_term(K), Rating#rating.r,
+						 Rating#rating.host, Rating#rating.port} | A]
 					end, [], MapAllBin).
 
 get_top(N) ->
@@ -182,15 +183,30 @@ get_top(N) ->
 	MapAllBin = ar_kv:select(DB, Filter),
 	All = maps:fold(fun(K,V,A) ->
 						Rating = binary_to_term(V),
-						[{binary_to_term(K), Rating#rating.r} | A]
+						[{binary_to_term(K),
+						  Rating#rating.r,
+						  Rating#rating.host,
+						  Rating#rating.port} | A]
 					end, [], MapAllBin),
-	Sorted = lists:sort(fun({_, AR}, {_, BR}) ->
+	Sorted = lists:sort(fun({_, AR, _, _}, {_, BR, _, _}) ->
 				AR > BR
 			   end, All),
 	lists:sublist(Sorted, N).
 
 get_top_joined(N) ->
-	lists:sublist([], N).
+	T = os:system_time(second),
+	case ets:select(?MODULE, [{ {{peer,'$1'},#rating{r='$2',ban='$3',host='$4',port='$5',_='_'}} ,
+								[{'<','$3',T}, {'=:=',{is_integer,'$3'},true}],
+								[{{ '$1','$2','$4','$5'}}] }]) of
+		[] ->
+			[];
+		All ->
+			Sorted = lists:sort(fun({_, AR, _, _}, {_, BR, _, _}) ->
+										AR > BR
+								end, All),
+			lists:sublist(Sorted, N)
+	end.
+
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -343,16 +359,17 @@ handle_info({event, peer, {Act, Kind, Request}}, State)
 	end;
 
 % just got a new peer
-handle_info({event, peer, {joined, Peer}}, State) ->
+handle_info({event, peer, {joined, Peer, Host, Port}}, State) ->
 	% check whether we had a peering with this Peer
 	BinPeer = term_to_binary(Peer),
 	Rating= case ar_kv:get(State#state.db, BinPeer) of
 		not_found ->
-			R = #rating{},
+			R = #rating{host = Host, port = Port},
 			ok = ar_kv:put(State#state.db, BinPeer, term_to_binary(R)),
 			R;
 		{ok, R} ->
-			binary_to_term(R)
+			R1 = R#rating{host = Host, port = Port},
+			binary_to_term(R1)
 	end,
 	ets:insert(?MODULE, {{peer, Peer}, Rating}),
 	{noreply, State};
