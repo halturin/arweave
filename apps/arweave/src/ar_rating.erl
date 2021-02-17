@@ -102,11 +102,6 @@
 		{response, not_found} => -500,
 		{push, malformed} => -10000,
 		{attack, any} => -10000
-		% after defenition of a new variative value you can use it here
-		% {example, a} => 100 bor ?YET_ANOTHER1
-		% {example, b} => 200 bor ?YET_ANOTHER2
-		% or along with the other variatives
-		% {example, c} => 200 bor ?YET_ANOTHER2 bor ?MINUS_TIME
 	},
 
 	% Call Trigger(Value) if event happend N times during period P(in sec).
