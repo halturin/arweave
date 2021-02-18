@@ -124,6 +124,7 @@ check_rate_and_triggers(_Config) ->
 		{attack, any} => {1, 0, ban, 1440}
 	},
 
+	% override default rates and triggers
 	ar_rating:set_triggers(Triggers),
 	ar_rating:set_rates(Rates),
 
