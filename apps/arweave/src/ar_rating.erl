@@ -238,16 +238,25 @@ start_link() ->
 %% @end
 %%--------------------------------------------------------------------
 init([]) ->
+	State = #state{},
+	{ok, Config} = application:get_env(arweave, config),
+	Triggers = maps:merge(State#state.triggers, Config#config.triggers),
+	Rates = maps:merge(State#state.rates, Config#config.rates),
 	{ok, Ref} = ar_kv:open("ratings"),
+	State1 = State#state{
+				db = Ref,
+				rates = Rates,
+				triggers = Triggers
+			},
 	ar_events:subscribe([network, peer, blocks, txs, chunks, attack]),
 	erlang:send_after(?COMPUTE_RATING_PERIOD, ?MODULE, {'$gen_cast', compute_ratings}),
 	% having at least 1 record means this process has been restarted (due to process fail)
 	% and we already joined to the arweave network
 	case ets:info(?MODULE, size) of
 		0 ->
-			{ok, #state{db = Ref}};
+			{ok, State1};
 		_ ->
-			{ok, #state{db = Ref, joined = true}}
+			{ok, State1#state{joined = true}}
 	end.
 
 %%--------------------------------------------------------------------
