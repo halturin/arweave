@@ -98,7 +98,7 @@
 		{request, malformed} => -1000,
 		{response, malformed} => -10000,
 		{response, request_timeout} => -1000,
-		{response, connect_timeout} => 0,
+		{response, connect_timeout} => -1, % can not be 0, otherwise trigger wont be called
 		{response, not_found} => -500,
 		{push, malformed} => -10000,
 		{attack, any} => -10000
@@ -313,6 +313,7 @@ handle_info({event, peer, {Act, Kind, Request}}, State)
 	ActRateFlags = maps:get({Act, Kind}, State#state.rates, 0),
 	Rate = rate_with_flags(ActRateFlags, Time),
 	Trigger = maps:get({Act, Kind}, State#state.triggers, undefined),
+	?LOG_ERROR("TRIGGER T ~p", [{Trigger}]),
 	T = os:system_time(second),
 	case ets:lookup(?MODULE, {peer, Peer}) of
 		[] ->
@@ -338,6 +339,9 @@ handle_info({event, peer, {Act, Kind, Request}}, State)
 					},
 					ets:insert(?MODULE, {{peer, Peer}, Rating1}),
 					update_rating(Peer, State#state.db),
+					{noreply, State};
+				{_ExtraRate, offline} ->
+					% do nothing
 					{noreply, State};
 				{ExtraRate, History1} ->
 					R1 = R + Rate + ExtraRate,
@@ -438,24 +442,29 @@ update_rating(Peer, DB) ->
 
 
 trigger(undefined, _Peer, History, _T) ->
+	?LOG_ERROR("TRIGGER 1 ~p", [{History}]),
 	% there is no reason to keep the history if trigger wasn't
 	% defined for the action.
 	{0, History};
 
 trigger({_N, _P, _, _V}, Peer, [H|_] = History, T) when H > T ->
+	?LOG_ERROR("TRIGGER 2 ~p", [{History}]),
 	% The last timestamp was added to the History is in the future (more
 	% than time T) it means we got event from banned peer.
 	% Send 'ban' again until the time H
 	ar_events:send(access, {ban, Peer, H}),
 	{0, History};
-trigger({_N, P, _, _V}, _Peer, [H|_], T) when T - H > P ->
+trigger({_N, P, _, _V}, _Peer, [H|_] = History, T) when T - H > P ->
+	?LOG_ERROR("TRIGGER 3 ~p", [{History}]),
 	% Last event happened longer than P seconds ago, so we dont
 	% need to keep old values. Keep the current one only.
 	{0, [T]};
 trigger({N, _P, _, _V}, _Peer, History, T) when length(History)+1 < N ->
+	?LOG_ERROR("TRIGGER 4 ~p", [{History}]),
 	% not enough events for the triggering. just keep it.
 	{0, [T|History]};
 trigger({N, P, Trigger, V}, Peer, History, T) ->
+	?LOG_ERROR("TRIGGER 5 ~p", [{History, T, V}]),
 	History1 = [T|History],
 	Period = T - lists:nth(N, History1),
 	case Period > P of
@@ -474,8 +483,11 @@ trigger({N, P, Trigger, V}, Peer, History, T) ->
 		_ when Trigger == penalty ->
 			{-V, History1};
 		_ when Trigger == offline ->
+			% remove it from the ETS so the rest of the
+			% events in the mailbox will be ignored
+			ets:delete(?MODULE, {peer, Peer}),
 			ar_events:send(peer, {left, Peer}),
-			{0, History1}
+			{0, offline}
 	end.
 
 rate_with_flags({X, F}, T) ->

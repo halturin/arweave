@@ -152,7 +152,6 @@ check_rate_and_triggers(_Config) ->
 	% CASE accounting income requests (negative) : peer is already joined, do some malformed requests,
 	% check rating
 	% ========================================================================================
-
 	% make zero rating
 	ets:insert(ar_rating, {{peer, PeerIncReq}, #rating{since = T - 100000}}),
 	ok = ar_events:send(peer, {request, malformed, EventPeer}),
@@ -174,7 +173,6 @@ check_rate_and_triggers(_Config) ->
 	% CASE accounting push/response (with time influence) : peer is already joined, do some requests
 	% with different timing, check rating
 	% ========================================================================================
-
 	% make zero rating
 	ets:insert(ar_rating, {{peer, PeerIncReq}, #rating{since = T - 100000}}),
 	EventPeer100 = #event_peer{
@@ -210,36 +208,108 @@ check_rate_and_triggers(_Config) ->
 	end,
 
 	% ========================================================================================
-	% CASE trigger 'ban' : peer is already joined, do some requests, catch 'ban' event,
-	% check rating
-	% ========================================================================================
-
-	% make zero rating
-	ets:insert(ar_rating, {{peer, PeerIncReq}, #rating{since = T - 100000}}),
-
-	% ========================================================================================
 	% CASE trigger 'bonus' : peer is already joined, do some requests, catch 'bonus' event,
 	% check rating
 	% ========================================================================================
-
 	% make zero rating
 	ets:insert(ar_rating, {{peer, PeerIncReq}, #rating{since = T - 100000}}),
+	lists:map(fun(_) ->
+					ar_events:send(peer, {push, block, EventPeer1000})
+			  end, lists:seq(1,31)),
+	timer:sleep(100),
+	gen_server:cast(ar_rating, compute_ratings),
+	timer:sleep(100),
+	case ets:lookup(ar_rating, {peer, PeerIncReq}) of
+		[{_, Rating5}] ->
+			Influence3 = ar_rating:influence(Rating5),
+			% 2000 - bonus for the {push, block}
+			% -1000 - for the low timing
+			% for the first 29 events peer got bonuses = 29 * (2000 - 1000) => 29000
+			% for the 30th event = 1000 + extra 500 (trigger: bonus)
+			% for the 31 - the same: bonus 1000 + extra 500 (trigger: bonus)
+			% so in total peer should have 32000 and the final rate
+			% will be trunc(32000 * Influence)
+			True3 = trunc(Influence3 * (500+500+1000*31)) == Rating5#rating.r,
+			True3 = true;
+		_ ->
+			ct:fail("got wrong rating from ets")
+	end,
+
 
 	% ========================================================================================
 	% CASE trigger 'penalty' : peer is already joined, do some requests, catch 'penalty' event,
 	% check rating
 	% ========================================================================================
-
+	% make zero rating
+	ets:insert(ar_rating, {{peer, PeerIncReq}, #rating{r = 1000, since = T - 100000}}),
+	lists:map(fun(_) ->
+					ar_events:send(peer, {request, tx, EventPeer})
+			  end, lists:seq(1,61)),
+	timer:sleep(100),
+	gen_server:cast(ar_rating, compute_ratings),
+	timer:sleep(100),
+	case ets:lookup(ar_rating, {peer, PeerIncReq}) of
+		[{_, Rating6}] ->
+			Influence4 = ar_rating:influence(Rating6),
+			% 10 - bonus for the {request, tx}
+			% for the first 59 events peer got bonuses = 59 * 10 => 590
+			% for the 60th event = bonus 10 + extra -10 (trigger: penalty)
+			% for the 61 - the same: bonus 10 + extra -10 (trigger: penalty)
+			% so in total peer should have 590 and the final rate
+			% will be trunc(590 * Influence)
+			True4 = trunc(Influence4 * (590)) == Rating6#rating.r,
+			True4 = true;
+		_ ->
+			ct:fail("got wrong rating from ets")
+	end,
+	% ========================================================================================
+	% CASE trigger 'ban' for a single event : peer is already joined, do some requests,
+	% catch 'ban' event, check rating
+	% ========================================================================================
 	% make zero rating
 	ets:insert(ar_rating, {{peer, PeerIncReq}, #rating{since = T - 100000}}),
+	% subscribe for the 'access' events to catch a 'ban'
+	ar_events:subscribe([access]),
+	T1 = os:system_time(second),
+	ar_events:send(peer, {attack, any, EventPeer}),
+	BanTimeAttack = wait_ban(PeerIncReq),
+	BanTimeAttack = T1 +60*1440,
+	ar_events:cancel(access),
+
+	% ========================================================================================
+	% CASE trigger 'ban' : peer is already joined, do some requests, catch 'ban' event,
+	% check rating
+	% ========================================================================================
+	% make zero rating
+	ets:insert(ar_rating, {{peer, PeerIncReq}, #rating{since = T - 100000}}),
+	% subscribe for the 'access' events to catch a 'ban'
+	ar_events:subscribe([access]),
+	T2 = os:system_time(second),
+	lists:map(fun(_) ->
+					ar_events:send(peer, {request, malformed, EventPeer})
+			  end, lists:seq(1,11)),
+	BanTime = wait_ban(PeerIncReq),
+	BanTime = T2 +60*60,
+	ar_events:cancel(access),
 
 	% ========================================================================================
 	% CASE trigger 'offline' : peer is already joined, do some requests, catch 'offline' event,
 	% check rating, check status offline/online
 	% ========================================================================================
-
 	% make zero rating
 	ets:insert(ar_rating, {{peer, PeerIncReq}, #rating{since = T - 100000}}),
+	ar_events:subscribe([peer]),
+	lists:map(fun(_) ->
+					ar_events:send(peer, {response, connect_timeout, EventPeer})
+			  end, lists:seq(1,7)),
+
+	wait_offline(PeerIncReq),
+	case ets:lookup(ar_rating, {peer, PeerIncReq}) of
+		[] ->
+			ok;
+		_ ->
+			ct:fail("peer is still online")
+	end,
 	ok.
 
 check_get_top_n_get_banned(_Config) ->
@@ -327,3 +397,23 @@ check_network_join(false) ->
 check_network_join(true) ->
 	true.
 
+wait_ban(Peer) ->
+	receive
+		{event, access, {ban, Peer, BanTime}} ->
+			BanTime;
+		X ->
+			ct:fail("wrong message on 'access ban' event awaiting: ~p", [X])
+	after 300 ->
+		ct:fail("timeout on 'access ban' event awaiting")
+	end.
+
+wait_offline(Peer) ->
+	receive
+		{event, peer, {left, Peer}} ->
+			ok;
+		_ ->
+			% ignore
+			wait_offline(Peer)
+	after 300 ->
+		ct:fail("timeout on 'peer left' event awaiting")
+	end.
