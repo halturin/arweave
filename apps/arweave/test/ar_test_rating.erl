@@ -98,6 +98,35 @@ peer_join_leave_rejoin(_Config) ->
 	end.
 
 check_rate_and_triggers(_Config) ->
+	Rates = #{
+		{request, tx} => 10,
+		{request, block} => 20,
+		{request, chunk} => 30,
+		{push, tx} => {1000, ar_rating:set_flags([?MINUS_TIME])},
+		{push, block} => {2000, ar_rating:set_flags([?MINUS_TIME])},
+		{response, tx} => {1000, ar_rating:set_flags([?MINUS_TIME])},
+		{response, block} => {2000, ar_rating:set_flags([?MINUS_TIME])},
+		{response, chunk} => {3000, ar_rating:set_flags([?MINUS_TIME])},
+		{response, any} => {1000, ar_rating:set_flags([?MINUS_TIME])},
+		{request, malformed} => -1000,
+		{response, malformed} => -10000,
+		{response, request_timeout} => -1000,
+		{response, connect_timeout} => -1, % can not be 0, otherwise trigger wont be called
+		{response, not_found} => -500,
+		{push, malformed} => -10000,
+		{attack, any} => -10000
+	},
+	Triggers = #{
+		{push, block} => {30, 3600, bonus, 500},
+		{request, malformed} => {10, 3600, ban, 60},
+		{request, tx} => {60, 60, penalty, 10},
+		{response, connect_timeout} => {5, 300, offline, 0},
+		{attack, any} => {1, 0, ban, 1440}
+	},
+
+	ar_rating:set_triggers(Triggers),
+	ar_rating:set_rates(Rates),
+
 	{state, Joined, _Changed, Rates, _Triggers, RatingDB} = sys:get_state(ar_rating),
 	case Joined of
 		false ->

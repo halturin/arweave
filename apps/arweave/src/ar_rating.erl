@@ -56,7 +56,11 @@
 	get_top/1,
 	rate_with_flags/2,
 	get_top_joined/1,
-	influence/1
+	influence/1,
+	set_flags/1,
+
+	set_triggers/1,
+	set_rates/1
 ]).
 
 
@@ -203,6 +207,11 @@ get_top_joined(N) ->
 			lists:sublist(Sorted, N)
 	end.
 
+set_triggers(Triggers) ->
+	ok = gen_server:call(?MODULE, {set_triggers, Triggers}).
+set_rates(Rating) ->
+	ok = gen_server:call(?MODULE, {set_rates, Rating}).
+
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -257,6 +266,12 @@ init([]) ->
 %%--------------------------------------------------------------------
 handle_call(get_db, _From, State) ->
 	{reply, State#state.db, State};
+handle_call({set_triggers, Triggers}, _From, State) ->
+	Triggers1 = maps:merge(State#state.triggers, Triggers),
+	{reply, ok, State#state{triggers = Triggers1}};
+handle_call({set_rates, Rates}, _From, State) ->
+	Rates1 = maps:merge(State#state.rates, Rates),
+	{reply, ok, State#state{rates = Rates1}};
 handle_call(Request, _From, State) ->
 	?LOG_ERROR([{event, unhandled_call}, {message, Request}]),
 	{reply, ok, State}.
