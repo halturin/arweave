@@ -442,29 +442,24 @@ update_rating(Peer, DB) ->
 
 
 trigger(undefined, _Peer, History, _T) ->
-	?LOG_ERROR("TRIGGER 1 ~p", [{History}]),
 	% there is no reason to keep the history if trigger wasn't
 	% defined for the action.
 	{0, History};
 
 trigger({_N, _P, _, _V}, Peer, [H|_] = History, T) when H > T ->
-	?LOG_ERROR("TRIGGER 2 ~p", [{History}]),
 	% The last timestamp was added to the History is in the future (more
 	% than time T) it means we got event from banned peer.
 	% Send 'ban' again until the time H
 	ar_events:send(access, {ban, Peer, H}),
 	{0, History};
-trigger({_N, P, _, _V}, _Peer, [H|_] = History, T) when T - H > P ->
-	?LOG_ERROR("TRIGGER 3 ~p", [{History}]),
+trigger({_N, P, _, _V}, _Peer, [H|_], T) when T - H > P ->
 	% Last event happened longer than P seconds ago, so we dont
 	% need to keep old values. Keep the current one only.
 	{0, [T]};
 trigger({N, _P, _, _V}, _Peer, History, T) when length(History)+1 < N ->
-	?LOG_ERROR("TRIGGER 4 ~p", [{History}]),
 	% not enough events for the triggering. just keep it.
 	{0, [T|History]};
 trigger({N, P, Trigger, V}, Peer, History, T) ->
-	?LOG_ERROR("TRIGGER 5 ~p", [{History, T, V}]),
 	History1 = [T|History],
 	Period = T - lists:nth(N, History1),
 	case Period > P of
