@@ -3,18 +3,19 @@
 %% with this file, You can obtain one at
 %% https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html
 
--module(ar_events_sup).
+-module(ar_network_peer_sup).
 
 -behaviour(supervisor).
 
 %% API
--export([start_link/0]).
+-export([start_link/0, start_peering/2]).
 
 %% Supervisor callbacks
 -export([init/1]).
 
 %% Helper macro for declaring children of supervisor
--define(CHILD(Mod, I, Type), {I, {Mod, start_link, [I]}, permanent, 5000, Type, [Mod]}).
+-define(CHILD(Id, Mod, Type, Args), {Id, {Mod, start_link, Args},
+                                     temporary, 1000, Type, [Mod]}).
 
 %% ===================================================================
 %% API functions
@@ -22,18 +23,21 @@
 start_link() ->
 	supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
+%%--------------------------------------------------------------------
+%% @doc
+%% Start new peering handler
+%%
+%% @spec start_peering(Peer, Options) -> {ok, Pid} | ignore | {error, Error}
+%% @end
+%%--------------------------------------------------------------------
+start_peering(Peer, Options) ->
+    supervisor:start_child(?MODULE, [{Peer, Options}]).
+
 %% ===================================================================
 %% Supervisor callbacks
 %% ===================================================================
-
 init([]) ->
-	{ok, {{one_for_one, 5, 10}, [
-		% events: ready/maintanence
-		?CHILD(ar_events, node, worker),
-		% events: joined (got at leats one peer) / left (lost the last peer)
-		?CHILD(ar_events, network, worker),
-		% events: joined/left/request (income requests)/response (for our requests)
-		?CHILD(ar_events, peer, worker),
-		% events: ban peer, set access restriction, etc...
-		?CHILD(ar_events, access, worker)
-	]}}.
+    {ok, { {simple_one_for_one, 5, 10}, [
+        ?CHILD(ar_network_peer, ar_network_peer, worker, [])
+    ]} }.
+

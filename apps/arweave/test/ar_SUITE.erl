@@ -25,7 +25,10 @@
 	% ar_rating.erl
 	rating_peer_join_leave_rejoin/1,
 	rating_check_rate_and_triggers/1,
-	rating_check_get_top_n_get_banned/1
+	rating_check_get_top_n_get_banned/1,
+	% ar_network.erl
+	network_join_leave_stateless/1,
+	network_join_leave_stateful/1
 ]).
 
 %%%===================================================================
@@ -188,7 +191,11 @@ groups() ->
 			rating_peer_join_leave_rejoin,
 			rating_check_rate_and_triggers,
 			rating_check_get_top_n_get_banned
-        ]}
+        ]},
+	{nodeNetwork,[sequence],[
+			network_join_leave_stateless,
+			network_join_leave_stateful
+		]}
     ].
 
 %%--------------------------------------------------------------------
@@ -220,15 +227,20 @@ mod_exist(Config) ->
 	{module, ar_node} = code:load_file(ar_node),
 	{module, ar_events} = code:load_file(ar_events),
 	{module, ar_rating} = code:load_file(ar_rating),
+	{module, ar_network} = code:load_file(ar_network),
 	Config.
 
-
+%% group nodeBasic
 ar_data_sync_fork_recovery(Config) -> ar_ct_data_sync:fork_recovery(Config).
 events_subscribe_send_cancel(Config) -> ar_test_events:subscribe_send_cancel(Config).
 events_process_terminated(Config) -> ar_test_events:process_terminated(Config).
 rating_peer_join_leave_rejoin(Config) -> ar_test_rating:peer_join_leave_rejoin(Config).
 rating_check_rate_and_triggers(Config) -> ar_test_rating:check_rate_and_triggers(Config).
 rating_check_get_top_n_get_banned(Config) -> ar_test_rating:check_get_top_n_get_banned(Config).
+
+%% group nodeNetwork
+network_join_leave_stateless(Config) -> ar_test_network:join_leave_stateless(Config).
+network_join_leave_stateful(Config) -> ar_test_network:join_leave_stateful(Config).
 
 %%%===================================================================
 %%% Private functions.

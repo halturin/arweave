@@ -239,7 +239,7 @@ init([]) ->
 				rates = Rates,
 				triggers = Triggers
 			},
-	ar_events:subscribe([peer]),
+	ar_events:subscribe(peer),
 	erlang:send_after(?COMPUTE_RATING_PERIOD, ?MODULE, {'$gen_cast', compute_ratings}),
 	{ok, State1}.
 

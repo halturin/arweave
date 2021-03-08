@@ -1,0 +1,226 @@
+%% This Source Code Form is subject to the terms of the GNU General
+%% Public License, v. 2.0. If a copy of the GPLv2 was not distributed
+%% with this file, You can obtain one at
+%% https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html
+
+-module(ar_network_peer).
+
+-behaviour(gen_server).
+
+-export([
+	start_link/1
+]).
+
+-export([
+	init/1,
+	handle_call/3,
+	handle_cast/2,
+	handle_info/2,
+	terminate/2,
+	code_change/3
+]).
+
+-include_lib("arweave/include/ar.hrl").
+-include_lib("arweave/include/ar_config.hrl").
+
+%% Internal state definition.
+-record(state, {
+	id, % my id
+	peer_ipport, % {A,B,C,D,E} where {A,B,C,D} - IP address, E - port
+	peer_ip,
+	peer_port,
+	peer_id,
+	validate_time = true,
+	fails = 0
+}).
+
+%%%===================================================================
+%%% API
+%%%===================================================================
+
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Starts the server
+%%
+%% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
+%% @end
+%%--------------------------------------------------------------------
+start_link(Args) ->
+	gen_server:start_link(?MODULE, Args, []).
+
+%%% gen_server callbacks
+%%%===================================================================
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Initializes the server
+%%
+%% @spec init(Args) -> {ok, State} |
+%%					   {ok, State, Timeout} |
+%%					   ignore |
+%%					   {stop, Reason}
+%% @end
+%%--------------------------------------------------------------------
+init({{IP,Port}, _Options}) ->
+	process_flag(trap_exit, true),
+	{ok, Config} = application:get_env(arweave, config),
+	ValidateTime = lists:member(time_syncing, Config#config.disable),
+	{A,B,C,D} = IP,
+	PeerIPPort = {A,B,C,D,Port},
+	gen_server:cast(self(), validate_network),
+	State = #state {
+		validate_time = ValidateTime,
+		peer_ipport = PeerIPPort,
+		peer_ip = IP,
+		peer_port = Port
+	},
+	{ok, State}.
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Handling call messages
+%%
+%% @spec handle_call(Request, From, State) ->
+%%									 {reply, Reply, State} |
+%%									 {reply, Reply, State, Timeout} |
+%%									 {noreply, State} |
+%%									 {noreply, State, Timeout} |
+%%									 {stop, Reason, Reply, State} |
+%%									 {stop, Reason, State}
+%% @end
+%%--------------------------------------------------------------------
+handle_call(Request, _From, State) ->
+	?LOG_ERROR("unhandled call: ~p", [Request]),
+	{reply, ok, State}.
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Handling cast messages
+%%
+%% @spec handle_cast(Msg, State) -> {noreply, State} |
+%%									{noreply, State, Timeout} |
+%%									{stop, Reason, State}
+%% @end
+%%--------------------------------------------------------------------
+handle_cast(_Msg, State) when State#state.fails > 3 ->
+	{stop, too_many_fails, State};
+handle_cast(validate_network, State) ->
+	case ar_http_iface_client:get_info(State#state.peer_ipport) of
+		Info when is_list(Info) ->
+			validate_network(Info,State);
+		EE ->
+			?LOG_ERROR("EEEEEEEEEEEE1 ~p", [EE]),
+			timer:send_after(5000, {'$gen_cast', validate_network}),
+			{noreply, State#state{fails = State#state.fails + 1}}
+	end;
+handle_cast(validate_time, State) when State#state.validate_time == false ->
+	Joined = {joined,
+		State#state.peer_id,
+		State#state.peer_ip,
+		State#state.peer_port
+	 },
+	ar_events:send(peer, Joined),
+	{noreply, State#state{fails = 0}};
+handle_cast(validate_time, State) ->
+	case ar_http_iface_client:get_time(State#state.peer_ipport, 5 * 1000) of
+		{ok, {RemoteTMin, RemoteTMax}} ->
+			LocalT = os:system_time(second),
+			Tolerance = ?JOIN_CLOCK_TOLERANCE,
+			case LocalT of
+				T when T < RemoteTMin - Tolerance ->
+					log_peer_clock_diff(State#state.peer_ipport, RemoteTMin - Tolerance - T),
+					{stop, wrong_time, State};
+				T when T < RemoteTMin - Tolerance div 2 ->
+					log_peer_clock_diff(State#state.peer_ipport, RemoteTMin - T),
+					gen_server:cast(self(), validate_time),
+					{noreply, State#state{validate_time = false}};
+				T when T > RemoteTMax + Tolerance ->
+					log_peer_clock_diff(State#state.peer_ipport, T - RemoteTMax - Tolerance),
+					{stop, wrong_time, State};
+				T when T > RemoteTMax + Tolerance div 2 ->
+					log_peer_clock_diff(State#state.peer_ipport, T - RemoteTMax),
+					gen_server:cast(self(), validate_time),
+					{noreply, State#state{validate_time = false}};
+				_ ->
+					gen_server:cast(self(), validate_time),
+					{noreply, State#state{validate_time = false}}
+			end;
+		{error, Err} ->
+			ar:console(
+				"Failed to get time from peer ~s: ~p.",
+				[ar_util:format_peer(State#state.peer_ipport), Err]
+			),
+			timer:send_after(5000, {'$gen_cast', validate_time}),
+			{noreply, State#state{fails = State#state.fails + 1}}
+	end;
+handle_cast(Msg, State) ->
+	?LOG_ERROR([{event, unhandled_cast}, {module, ?MODULE}, {message, Msg}]),
+	{noreply, State}.
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Handling all non call/cast messages
+%%
+%% @spec handle_info(Info, State) -> {noreply, State} |
+%%									 {noreply, State, Timeout} |
+%%									 {stop, Reason, State}
+%% @end
+%%--------------------------------------------------------------------
+handle_info(Info, State) ->
+	?LOG_ERROR([{event, unhandled_info}, {module, ?MODULE}, {info, Info}]),
+	{noreply, State}.
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% This function is called by a gen_server when it is about to
+%% terminate. It should be the opposite of Module:init/1 and do any
+%% necessary cleaning up. When it returns, the gen_server terminates
+%% with Reason. The return value is ignored.
+%%
+%% @spec terminate(Reason, State) -> void()
+%% @end
+%%--------------------------------------------------------------------
+terminate(_Reason, _State) ->
+	?LOG_INFO([{event, ar_network_terminated}, {module, ?MODULE}]),
+	ok.
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Convert process state when code is changed
+%%
+%% @spec code_change(OldVsn, State, Extra) -> {ok, NewState}
+%% @end
+%%--------------------------------------------------------------------
+code_change(_OldVsn, State, _Extra) ->
+	{ok, State}.
+
+%%%===================================================================
+%%% Internal functions
+%%%===================================================================
+validate_network(Info, State) ->
+	PeerID = State#state.peer_id,
+	case proplists:get_value(name, Info) of
+		<<?NETWORK_NAME>> ->
+			State1 = State#state{
+				fails = 0,
+				peer_id = proplists:get_value(id, Info, PeerID)
+			},
+			gen_server:cast(self(), validate_time),
+			{noreply, State1};
+		EE ->
+			?LOG_ERROR("EEEEEEEEEEEE ~p", [EE]),
+			{stop, wrong_network, State}
+	end.
+
+log_peer_clock_diff(Peer, Diff) ->
+	Warning = "Your local clock deviates from peer ~s by ~B seconds or more.",
+	WarningArgs = [ar_util:format_peer(Peer), Diff],
+	io:format(Warning, WarningArgs),
+	?LOG_WARNING(Warning, WarningArgs).

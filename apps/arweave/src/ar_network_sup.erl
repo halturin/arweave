@@ -3,7 +3,7 @@
 %% with this file, You can obtain one at
 %% https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html
 
--module(ar_events_sup).
+-module(ar_network_sup).
 
 -behaviour(supervisor).
 
@@ -14,7 +14,7 @@
 -export([init/1]).
 
 %% Helper macro for declaring children of supervisor
--define(CHILD(Mod, I, Type), {I, {Mod, start_link, [I]}, permanent, 5000, Type, [Mod]}).
+-define(CHILD(I, Type), {I, {I, start_link, []}, permanent, 5000, Type, [I]}).
 
 %% ===================================================================
 %% API functions
@@ -25,15 +25,8 @@ start_link() ->
 %% ===================================================================
 %% Supervisor callbacks
 %% ===================================================================
-
 init([]) ->
 	{ok, {{one_for_one, 5, 10}, [
-		% events: ready/maintanence
-		?CHILD(ar_events, node, worker),
-		% events: joined (got at leats one peer) / left (lost the last peer)
-		?CHILD(ar_events, network, worker),
-		% events: joined/left/request (income requests)/response (for our requests)
-		?CHILD(ar_events, peer, worker),
-		% events: ban peer, set access restriction, etc...
-		?CHILD(ar_events, access, worker)
+		?CHILD(ar_network_peer_sup, supervisor),
+		?CHILD(ar_network, worker)
 	]}}.

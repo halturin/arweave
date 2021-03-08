@@ -224,6 +224,7 @@ handle_info(wallets_ready, State) ->
 		{weave_size,			B#block.weave_size},
 		{block_txs_pairs,		[block_txs_pair(Block) || Block <- Blocks]}
 	]),
+	ar_events:send(node, ready),
 	{noreply, reset_miner(State)};
 
 handle_info({new_block, Peer, Height, NewB, BDS, ReceiveTimestamp}, State) ->
