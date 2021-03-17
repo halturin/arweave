@@ -11,7 +11,17 @@
 
 -export([start_link/0]).
 
--export([init/1, handle_cast/2, handle_info/2, terminate/2, tx_mempool_size/1]).
+-export([
+	init/1,
+	handle_call/3,
+	handle_cast/2,
+	handle_info/2,
+	terminate/2
+]).
+
+-export([
+	tx_mempool_size/1
+]).
 
 -include_lib("arweave/include/ar.hrl").
 -include_lib("arweave/include/ar_config.hrl").
@@ -27,25 +37,116 @@
 
 -define(FILTER_MEMPOOL_CHUNK_SIZE, 100).
 
-%%%===================================================================
-%%% Public interface.
-%%%===================================================================
-
+%%--------------------------------------------------------------------
+%% @doc
+%% Starts the server
+%%
+%% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
+%% @end
+%%--------------------------------------------------------------------
 start_link() ->
 	gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
-%%%===================================================================
-%%% Generic server callbacks.
-%%%===================================================================
-
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Initializes the server
+%%
+%% @spec init(Args) -> {ok, State} |
+%%					   {ok, State, Timeout} |
+%%					   ignore |
+%%					   {stop, Reason}
+%% @end
+%%--------------------------------------------------------------------
 init([]) ->
 	process_flag(trap_exit, true),
+	ok = ar_events:subscribe(network),
 	%% Initialize RandomX.
 	ar_randomx_state:start(),
 	ar_randomx_state:start_block_polling(),
 	%% Read persisted mempool.
 	load_mempool(),
-	%% Join the network.
+	{ok, #{}}.
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Handling call messages
+%%
+%% @spec handle_call(Request, From, State) ->
+%%									 {reply, Reply, State} |
+%%									 {reply, Reply, State, Timeout} |
+%%									 {noreply, State} |
+%%									 {noreply, State, Timeout} |
+%%									 {stop, Reason, Reply, State} |
+%%									 {stop, Reason, State}
+%% @end
+%%--------------------------------------------------------------------
+handle_call(Request, _From, State) ->
+	?LOG_ERROR("unhandled call: ~p", [Request]),
+	{reply, ok, State}.
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Handling cast messages
+%%
+%% @spec handle_cast(Msg, State) -> {noreply, State} |
+%%									{noreply, State, Timeout} |
+%%									{stop, Reason, State}
+%% @end
+%%--------------------------------------------------------------------
+handle_cast(process_task_queue, #{ task_queue := TaskQueue } = State) ->
+	RunTask =
+		case gb_sets:is_empty(TaskQueue) of
+			true ->
+				false;
+			false ->
+				case ets:lookup(node_state, is_joined) of
+					[{_, true}] ->
+						true;
+					_ ->
+						false
+				end
+		end,
+	case RunTask of
+		true ->
+			record_metrics(),
+			{{_Priority, Task}, TaskQueue2} = gb_sets:take_smallest(TaskQueue),
+			gen_server:cast(self(), process_task_queue),
+			handle_task(Task, State#{ task_queue => TaskQueue2 });
+		false ->
+			timer:apply_after(
+				?PROCESS_TASK_QUEUE_FREQUENCY_MS,
+				gen_server,
+				cast,
+				[self(), process_task_queue]
+			),
+			{noreply, State}
+	end;
+
+handle_cast(Message, #{ task_queue := TaskQueue } = State) ->
+	Task = {priority(Message), Message},
+	case gb_sets:is_element(Task, TaskQueue) of
+		true ->
+			{noreply, State};
+		false ->
+			{noreply, State#{ task_queue => gb_sets:insert(Task, TaskQueue) }}
+	end.
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Handling all non call/cast messages
+%%
+%% @spec handle_info(Info, State) -> {noreply, State} |
+%%									 {noreply, State, Timeout} |
+%%									 {stop, Reason, State}
+%% @end
+%%--------------------------------------------------------------------
+handle_info({event, network, joined}, #{}) ->
+	?LOG_ERROR("0000000000000000 network joined"),
+	%% Join the node.
 	{ok, Config} = application:get_env(arweave, config),
 	BI =
 		case {Config#config.start_from_block_index, Config#config.init} of
@@ -106,14 +207,14 @@ init([]) ->
 		_ ->
 			do_nothing
 	end,
-	gen_server:cast(self(), process_task_queue),
+	gen_server:cast(?MODULE, process_task_queue),
 	ets:insert(node_state, [
 		{is_joined,						false},
 		{hash_list_2_0_for_1_0_blocks,	read_hash_list_2_0_for_1_0_blocks()}
 	]),
 	%% Start the HTTP server.
 	ok = ar_http_iface_server:start(),
-	{ok, #{
+	{noreply, #{
 		miner => undefined,
 		automine => false,
 		tags => [],
@@ -122,81 +223,22 @@ init([]) ->
 		blocks_missing_txs => sets:new(),
 		missing_txs_lookup_processes => #{},
 		task_queue => gb_sets:new()
-	}}.
+	}};
 
-load_mempool() ->
-	case ar_storage:read_term(mempool) of
-		{ok, {TXs, MempoolSize}} ->
-			Map =
-				maps:map(
-					fun(TXID, {TX, Status}) ->
-						ets:insert(node_state, {{tx, TXID}, TX}),
-						Status
-					end,
-					TXs
-				),
-			ets:insert(node_state, [
-				{mempool_size, MempoolSize},
-				{tx_statuses, Map}
-			]);
-		not_found ->
-			ets:insert(node_state, [
-				{mempool_size, {0, 0}},
-				{tx_statuses, #{}}
-			]);
-		{error, Error} ->
-			?LOG_ERROR([{event, failed_to_load_mempool}, {reason, Error}]),
-			ets:insert(node_state, [
-				{mempool_size, {0, 0}},
-				{tx_statuses, #{}}
-			])
-	end.
-
-handle_cast(process_task_queue, #{ task_queue := TaskQueue } = State) ->
-	RunTask =
-		case gb_sets:is_empty(TaskQueue) of
-			true ->
-				false;
-			false ->
-				case ets:lookup(node_state, is_joined) of
-					[{_, true}] ->
-						true;
-					_ ->
-						false
-				end
-		end,
-	case RunTask of
-		true ->
-			record_metrics(),
-			{{_Priority, Task}, TaskQueue2} = gb_sets:take_smallest(TaskQueue),
-			gen_server:cast(self(), process_task_queue),
-			handle_task(Task, State#{ task_queue => TaskQueue2 });
-		false ->
-			timer:apply_after(
-				?PROCESS_TASK_QUEUE_FREQUENCY_MS,
-				gen_server,
-				cast,
-				[self(), process_task_queue]
-			),
-			{noreply, State}
-	end;
-
-handle_cast(Message, #{ task_queue := TaskQueue } = State) ->
-	Task = {priority(Message), Message},
-	case gb_sets:is_element(Task, TaskQueue) of
-		true ->
-			{noreply, State};
-		false ->
-			{noreply, State#{ task_queue => gb_sets:insert(Task, TaskQueue) }}
-	end.
+handle_info({event, network, joined}, State) ->
+	?LOG_ERROR("0000000000000000 network rejoined"),
+	% reconnected. do nothing.
+	{noreply, State};
+handle_info({event, network, left}, State) ->
+	?LOG_ERROR("0000000000000000 network left"),
+	{noreply, State};
 
 handle_info(Info, State) when is_record(Info, gs_msg) ->
 	gen_server:cast(?MODULE, {gossip_message, Info}),
 	{noreply, State};
 
 handle_info({join, BI, Blocks}, State) ->
-	{ok, Config} = application:get_env(arweave, config),
-	{ok, _} = ar_wallets:start_link([{blocks, Blocks}, {peers, Config#config.peers}]),
+	{ok, _} = ar_wallets:start_link([{blocks, Blocks}]),
 	ets:insert(node_state, [
 		{block_index,	BI},
 		{joined_blocks,	Blocks}
@@ -250,6 +292,17 @@ handle_info(Info, State) ->
 	?LOG_ERROR([{event, unhandled_info}, {module, ?MODULE}, {message, Info}]),
 	{noreply, State}.
 
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% This function is called by a gen_server when it is about to
+%% terminate. It should be the opposite of Module:init/1 and do any
+%% necessary cleaning up. When it returns, the gen_server terminates
+%% with Reason. The return value is ignored.
+%%
+%% @spec terminate(Reason, State) -> void()
+%% @end
+%%--------------------------------------------------------------------
 terminate(Reason, #{ miner := Miner }) ->
 	ar_http_iface_server:stop(),
 	case ets:lookup(node_state, is_joined) of
@@ -281,6 +334,34 @@ terminate(Reason, #{ miner := Miner }) ->
 %%%===================================================================
 %%% Private functions.
 %%%===================================================================
+
+load_mempool() ->
+	case ar_storage:read_term(mempool) of
+		{ok, {TXs, MempoolSize}} ->
+			Map =
+				maps:map(
+					fun(TXID, {TX, Status}) ->
+						ets:insert(node_state, {{tx, TXID}, TX}),
+						Status
+					end,
+					TXs
+				),
+			ets:insert(node_state, [
+				{mempool_size, MempoolSize},
+				{tx_statuses, Map}
+			]);
+		not_found ->
+			ets:insert(node_state, [
+				{mempool_size, {0, 0}},
+				{tx_statuses, #{}}
+			]);
+		{error, Error} ->
+			?LOG_ERROR([{event, failed_to_load_mempool}, {reason, Error}]),
+			ets:insert(node_state, [
+				{mempool_size, {0, 0}},
+				{tx_statuses, #{}}
+			])
+	end.
 
 record_metrics() ->
 	[{mempool_size, MempoolSize}] = ets:lookup(node_state, mempool_size),

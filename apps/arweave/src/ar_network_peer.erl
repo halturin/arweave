@@ -25,11 +25,14 @@
 
 %% Internal state definition.
 -record(state, {
+	since = os:system_time(second),
+	lifespan,
 	id, % my id
 	peer_ipport, % {A,B,C,D,E} where {A,B,C,D} - IP address, E - port
 	peer_ip,
 	peer_port,
 	peer_id,
+	peers = #{}, % map of peers
 	validate_time = true,
 	fails = 0
 }).
@@ -63,18 +66,21 @@ start_link(Args) ->
 %%					   {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init({{IP,Port}, _Options}) ->
+init({{IP,Port}, Options}) ->
 	process_flag(trap_exit, true),
 	{ok, Config} = application:get_env(arweave, config),
 	ValidateTime = lists:member(time_syncing, Config#config.disable),
 	{A,B,C,D} = IP,
 	PeerIPPort = {A,B,C,D,Port},
 	gen_server:cast(self(), validate_network),
+	Now = os:system_time(second),
 	State = #state {
 		validate_time = ValidateTime,
 		peer_ipport = PeerIPPort,
 		peer_ip = IP,
-		peer_port = Port
+		peer_port = Port,
+		%lifespan = Now + proplists:get_value(lifespan, Options,?PEERING_LIFESPAN) * 60
+		lifespan = Now + proplists:get_value(lifespan, Options, 2) * 60
 	},
 	{ok, State}.
 
@@ -107,13 +113,12 @@ handle_call(Request, _From, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_cast(_Msg, State) when State#state.fails > 3 ->
-	{stop, too_many_fails, State};
+	{stop, normal, State};
 handle_cast(validate_network, State) ->
-	case ar_http_iface_client:get_info(State#state.peer_ipport) of
+	case ar_network_http_client:get_info(State#state.peer_ipport) of
 		Info when is_list(Info) ->
 			validate_network(Info,State);
-		EE ->
-			?LOG_ERROR("EEEEEEEEEEEE1 ~p", [EE]),
+		_ ->
 			timer:send_after(5000, {'$gen_cast', validate_network}),
 			{noreply, State#state{fails = State#state.fails + 1}}
 	end;
@@ -124,23 +129,25 @@ handle_cast(validate_time, State) when State#state.validate_time == false ->
 		State#state.peer_port
 	 },
 	ar_events:send(peer, Joined),
+	?LOG_ERROR("0000000000000000 ~p just joined", [State#state.peer_ipport]),
+	gen_server:cast(self(), get_peers),
 	{noreply, State#state{fails = 0}};
 handle_cast(validate_time, State) ->
-	case ar_http_iface_client:get_time(State#state.peer_ipport, 5 * 1000) of
+	case ar_network_http_client:get_time(State#state.peer_ipport, 5 * 1000) of
 		{ok, {RemoteTMin, RemoteTMax}} ->
 			LocalT = os:system_time(second),
 			Tolerance = ?JOIN_CLOCK_TOLERANCE,
 			case LocalT of
 				T when T < RemoteTMin - Tolerance ->
 					log_peer_clock_diff(State#state.peer_ipport, RemoteTMin - Tolerance - T),
-					{stop, wrong_time, State};
+					{stop, normal, State};
 				T when T < RemoteTMin - Tolerance div 2 ->
 					log_peer_clock_diff(State#state.peer_ipport, RemoteTMin - T),
 					gen_server:cast(self(), validate_time),
 					{noreply, State#state{validate_time = false}};
 				T when T > RemoteTMax + Tolerance ->
 					log_peer_clock_diff(State#state.peer_ipport, T - RemoteTMax - Tolerance),
-					{stop, wrong_time, State};
+					{stop, normal, State};
 				T when T > RemoteTMax + Tolerance div 2 ->
 					log_peer_clock_diff(State#state.peer_ipport, T - RemoteTMax),
 					gen_server:cast(self(), validate_time),
@@ -156,6 +163,21 @@ handle_cast(validate_time, State) ->
 			),
 			timer:send_after(5000, {'$gen_cast', validate_time}),
 			{noreply, State#state{fails = State#state.fails + 1}}
+	end;
+handle_cast(get_peers, State) ->
+	timer:send_after(60000, {'$gen_cast', get_peers}),
+	Now = os:system_time(second),
+	case ar_network_http_client:get_peers(State#state.peer_ipport) of
+		_Peers when State#state.lifespan < Now ->
+			?LOG_ERROR("0000000000000000 ~p time to die", [State#state.peer_ipport]),
+			{stop, normal, State};
+		Peers when is_list(Peers) ->
+			lists:map(fun({A,B,C,D,Port}) ->
+				ar_network:add_peer_candidate({A,B,C,D}, Port)
+			end, Peers),
+			{noreply, State};
+		_ ->
+			{noreply, State}
 	end;
 handle_cast(Msg, State) ->
 	?LOG_ERROR([{event, unhandled_cast}, {module, ?MODULE}, {message, Msg}]),
@@ -214,9 +236,8 @@ validate_network(Info, State) ->
 			},
 			gen_server:cast(self(), validate_time),
 			{noreply, State1};
-		EE ->
-			?LOG_ERROR("EEEEEEEEEEEE ~p", [EE]),
-			{stop, wrong_network, State}
+		_ ->
+			{stop, normal, State}
 	end.
 
 log_peer_clock_diff(Peer, Diff) ->

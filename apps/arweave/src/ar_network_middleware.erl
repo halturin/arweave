@@ -9,7 +9,10 @@
 execute(Req, Env) ->
 	case cowboy_req:header(<<"x-network">>, Req, <<"arweave.N.1">>) of
 		<<?NETWORK_NAME>> ->
-			maybe_add_peer(ar_http_util:arweave_peer(Req)),
+			Peer = cowboy_req:peer(Req),
+			PortBin= cowboy_req:header(<<"x-p2p-port">>, Req, <<"0">>),
+			Port = binary_to_integer(PortBin),
+			add_peer(Peer, Port),
 			{ok, Req, Env};
 		_ ->
 			case cowboy_req:method(Req) of
@@ -24,13 +27,12 @@ execute(Req, Env) ->
 			end
 	end.
 
-maybe_add_peer(Peer) ->
-	case ar_meta_db:get({peer, Peer}) of
-		not_found ->
-			ar_bridge:add_remote_peer(Peer);
-		_ ->
-			ok
-	end.
+add_peer(_, 0) ->
+	ok;
+add_peer({{A,B,C,D}, Port}, _) ->
+	ar_network:add_peer_candidate({A,B,C,D}, Port);
+add_peer(_, _) ->
+	ok.
 
 wrong_network(Req) ->
 	{stop, cowboy_req:reply(412, #{}, jiffy:encode(#{ error => wrong_network }), Req)}.

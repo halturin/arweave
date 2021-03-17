@@ -23,26 +23,19 @@
 -export([
 	broadcast/2,
 	broadcast/3,
-	add_peer_candidate/1
+	add_peer_candidate/2
 ]).
 
 -include_lib("arweave/include/ar.hrl").
 -include_lib("arweave/include/ar_config.hrl").
 
 %% ETS table ar_network (belongs to ar_sup process)
-%% Peer -> {active|passive, undefined|online|offline}
-%% * Peer - {IP,Port}. example {127,0,0,1,1984}
-%% * active - peer is able to accept incoming request
-%% * passive - peer is behind the NAT.
-%% * {online, Pid, Since} - peering has been established. Since - timestamp.
-%%   Do disconnect after Since + PEERING_LIFESPAN.
-%% * {offline, Since} - do not attempt to connect to this peer
-%%   until Since + PEER_SLEEP_TIME.
-%% * {undefined, Pid} - just started peering process
-%% * undefined - candidate for peering
+%% {{IP, Port}, Pid, Since}
+%% Pid - 'undefined' if peer is offline (candidate or went offline)
+%% Since - timestamp of the online/offline statement change
 
 %% keep this number of joined peers, but do not exceed this limit.
--define(PEERS_JOINED_MAX, 100).
+-define(PEERS_JOINED_MAX, 10).
 %% do not bother the peer during this time if its went offline
 -define(PEER_SLEEP_TIME, 60). % in minutes
 %% we should rotate the peers
@@ -61,25 +54,51 @@
 
 %%--------------------------------------------------------------------
 %% @doc
-%% Send Block to all active(joined) peers. Returns a reference in order to
+%% Sends Block to all active(joined) peers. Returns a reference in order to
 %% handle {sent, block, Ref} message on a sender side. This message is
 %% sending once all the peering process are reported on this request.
 %% @spec broadcast(block, Block) -> {ok, Ref} | {error, Error}
-%%
+%% @end
+%%--------------------------------------------------------------------
+broadcast(block, Block) ->
+	gen_server:call(?MODULE, {broadcast, block, Block, self()});
+broadcast(tx, TX) ->
+	gen_server:call(?MODULE, {broadcast, tx, TX, self()}).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Sends Block to the given peers. Returns a reference in order to
+%% handle {sent, block, Ref} message on a sender side. This message is
+%% sending once all the peering process are reported on this request.
 %% To - list of peers ID where the given Block should be delivered to.
 %% Useful with ar_rating:get_top_joined(N)
 %% @spec broadcast(block, Block, To) -> {ok, Ref} | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
-broadcast(block, Block) ->
-	gen_server:call(?MODULE, {broadcast, block, Block, self()}).
 broadcast(block, Block, To) when is_list(To) ->
-	gen_server:call(?MODULE, {broadcast, block, Block, self(), To}).
+	gen_server:call(?MODULE, {broadcast, block, Block, self(), To});
+broadcast(tx, TX, To) when is_list(To) ->
+	gen_server:call(?MODULE, {broadcast, tx, TX, self(), To}).
+
+
 %% @doc
-%% add_peer_candidate adds a record with given information for the
-%% future peering
-add_peer_candidate(PeerIPPort) ->
-	ets:insert(?MODULE, {PeerIPPort, undefined, undefined}).
+%% add_peer_candidate adds a record with given IP address and Port number for the
+%% future peering. Ignore private networks.
+add_peer_candidate({192,168,_,_}, _Port) -> false;
+add_peer_candidate({169,254,_,_}, _Port) -> false;
+add_peer_candidate({172,X,_,_}, _Port) when X > 15, X < 32 -> false; % 172.16..172.31
+add_peer_candidate({10,_,_,_}, _Port) -> false;
+add_peer_candidate({127,_,_,_}, _Port) -> false;
+add_peer_candidate({255,255,255,255}, _Port) -> false;
+add_peer_candidate({A,B,C,D} = IP, Port) when Port > 0, Port < 65536,
+											A > 0, A < 256,
+											B > -1, B < 256,
+											C > -1, C < 256,
+											D > -1, D < 256 ->
+	% do not overwrite if its already exist
+	ets:insert_new(?MODULE, {{IP, Port}, undefined, undefined});
+%% ignore any garbage
+add_peer_candidate(_IP, _Port) -> false.
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -143,44 +162,84 @@ handle_call(Request, _From, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_cast(join, State) ->
-	Timer = case peers_joined() of
-		[] ->
-			{ok, Config} = application:get_env(arweave, config),
+	?LOG_ERROR("0000000000000000 joining..."),
+	{ok, Config} = application:get_env(arweave, config),
+	case peers_joined() of
+		Peers when length(Peers) < length(Config#config.peers) ->
 			lists:map(fun({A,B,C,D,Port}) ->
-				peering({A,B,C,D}, Port, [])
+				% Override default PEER_SLEEP_TIME for the trusted peers.
+				% During the joining we should ignore this timing.
+				peering({A,B,C,D}, Port, [{sleep_time, 0}])
 			end, Config#config.peers),
+			% send some metrics
+			prometheus_gauge:set(arweave_peer_count, length(Peers)),
 			{ok, T} = timer:send_after(10000, {'$gen_cast', join}),
-			T;
+			{noreply, State#state{peering_timer = T}};
 		_ when State#state.ready == true->
 			% seems its has been restarted. we should
 			% start 'peering' process
 			{ok, T} = timer:send_after(10000, {'$gen_cast', peering}),
-			T;
+			{noreply, State#state{peering_timer = T}};
 		_ ->
 			% do nothing. waiting for node event 'ready'
-			undefined
-	end,
-	{noreply, State#state{peering_timer = Timer}};
+			{noreply, State#state{peering_timer = undefined}}
+	end;
 handle_cast(_Msg, State)  when State#state.ready == false ->
 	% do nothing
 	{noreply, State};
 handle_cast(peering, State) ->
-	Timer = case peers_joined() of
+	?LOG_ERROR("0000000000000000 peering..."),
+	case peers_joined() of
 		[] ->
 			gen_server:cast(?MODULE, join),
-			undefined;
-		Peers when length(Peers) > ?PEERS_JOINED_MAX ->
+			prometheus_gauge:set(arweave_peer_count, 0),
+			{noreply, State#state{peering_timer = undefined}};
+		Peers when length(Peers) < ?PEERS_JOINED_MAX ->
+			% how many connection we have to have
+			N = ?PEERS_JOINED_MAX - length(Peers),
+			% get the top 3*PEERS_JOINED_MAX peers and transform it
+			% to the [{IP, Port}]
+			RatedPeers = lists:foldl(fun({_ID, _Rating, {_,_,_,_} = IP, Port}, L) ->
+					[{IP, Port}|L];
+				({_ID, _Rating, _Host, _Port}, L) ->
+					L
+			end, [], ar_rating:get_top(3*?PEERS_JOINED_MAX)),
+			% get all offline peers. the same format [{IP, Port}]
+			OfflinePeers = peers_offline(),
+			% transform list of joined peers into the same format [{IP, Port}]
+			OnlinePeers = lists:foldl(fun(P,M) -> maps:put(P,ok,M) end, #{}, Peers),
+			% merge them all together (excluding already joined peers) into
+			% the Candidates list.
+			{Candidates,_} = lists:foldl(fun(P,{L,M}) ->
+				Skip = maps:get(P,M,false),
+				case maps:get(P, OnlinePeers, undefined) of
+					undefined when Skip == false ->
+						{[P|L],maps:put(P, true, M)};
+					_ ->
+						{L,M}
+				end
+			end, {[],#{}}, lists:append(RatedPeers,OfflinePeers) ),
+			% get random cadidate N times from Candidates list
+			% and start peering process with choosen peer
+			lists:foldl(fun(_, []) ->
+				% not enough cadidates to reach the limit of PEERS_JOINED_MAX
+				[];
+			(_, C) ->
+				Nth = rand:uniform(length(C)),
+				{C1,[{IP,Port}|C2]} = lists:split(Nth - 1, C),
+				peering(IP, Port, []),
+				lists:append(C1,C2)
+			end, Candidates, lists:seq(1,N) ),
+			% go further
+			prometheus_gauge:set(arweave_peer_count, length(Peers)),
 			{ok, T} = timer:send_after(10000, {'$gen_cast', peering}),
-			T;
-		_Peers ->
-			%N = length(Peers),
-			%RatedPeers = ar_rating:get_top(100),
-
-
+			{noreply, State#state{peering_timer = T}};
+		Peers ->
+			?LOG_ERROR("0000000000000000 do nothing"),
+			prometheus_gauge:set(arweave_peer_count, length(Peers)),
 			{ok, T} = timer:send_after(10000, {'$gen_cast', peering}),
-			T
-	end,
-	{noreply, State#state{peering_timer = Timer}};
+			{noreply, State#state{peering_timer = T}}
+	end;
 handle_cast(Msg, State) ->
 	?LOG_ERROR([{event, unhandled_cast}, {module, ?MODULE}, {message, Msg}]),
 	{noreply, State}.
@@ -199,6 +258,7 @@ handle_info({event, node, ready}, State) when is_reference(State#state.peering_t
 	% already started self casting with 'peering' message.
 	{noreply, State};
 handle_info({event, node, ready}, State) ->
+	?LOG_ERROR("0000000000000000 node is ready"),
 	gen_server:cast(?MODULE, peering),
 	{noreply, State#state{ready = true}};
 handle_info({event, node, _}, State) ->
@@ -207,11 +267,19 @@ handle_info({event, node, _}, State) ->
 	erlang:exit(whereis(ar_network_peer_sup), maintenance),
 	{noreply, State#state{ready = false, peering_timer = undefined}};
 handle_info({event, peer, {joined, PeerID, IP, Port}}, State) ->
+	Joined = peers_joined(),
 	case ets:lookup(?MODULE, {IP,Port}) of
 		[] ->
 			?LOG_ERROR("internal error. got event joined from unknown peer",[{IP, Port, PeerID}]),
 			{noreply, State};
+		[{{IP,Port}, Pid, undefined}] when length(Joined) == 0 ->
+			?LOG_ERROR("0000000000000000 peer FIRST joined "),
+			ar_events:send(network, joined),
+			T = os:system_time(second),
+			ets:insert(?MODULE, {{IP,Port}, Pid, T}),
+			{noreply, State};
 		[{{IP,Port}, Pid, undefined}] ->
+			?LOG_ERROR("0000000000000000 peer N ~p joined ", [length(Joined)]),
 			T = os:system_time(second),
 			ets:insert(?MODULE, {{IP,Port}, Pid, T}),
 			{noreply, State}
@@ -219,7 +287,14 @@ handle_info({event, peer, {joined, PeerID, IP, Port}}, State) ->
 handle_info({'DOWN', _Ref, process, Pid, Reason}, State) ->
 	% peering process is down
 	peer_went_offline(Pid, Reason),
-	{noreply, State};
+	case peers_joined() of
+		[] ->
+			ar_events:send(network, left),
+			gen_server:cast(?MODULE, join),
+			{noreply, State};
+		_ ->
+			{noreply, State}
+	end;
 handle_info(Info, State) ->
 	?LOG_ERROR([{event, unhandled_info}, {module, ?MODULE}, {info, Info}]),
 	{noreply, State}.
@@ -254,10 +329,12 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 peering(IP, Port, Options)->
+	?LOG_ERROR("0000000000000000 ~p connecting...", [{IP,Port}]),
 	T = os:system_time(second),
+	SleepTime = proplists:get_value(sleep_time, Options, ?PEER_SLEEP_TIME),
 	case ets:lookup(?MODULE, {IP,Port}) of
 		[] ->
-			% first time to connect to this peer
+			% first time connects with this peer
 			{ok, Pid} = ar_network_peer_sup:start_peering({IP,Port}, Options),
 			ets:insert(?MODULE, {{IP,Port}, Pid, undefined}),
 			monitor(process, Pid);
@@ -266,8 +343,8 @@ peering(IP, Port, Options)->
 			{ok, Pid} = ar_network_peer_sup:start_peering({IP,Port}, Options),
 			ets:insert(?MODULE, {{IP,Port}, Pid, undefined}),
 			monitor(process, Pid);
-		[{{IP,Port}, undefined, Since}] when (T - Since)/60 > ?PEER_SLEEP_TIME ->
-			% peer was offline, but longer than PEER_SLEEP_TIME
+		[{{IP,Port}, undefined, Since}] when (T - Since)/60 > SleepTime ->
+			% peer was offline, but longer than given SleepTime
 			{ok, Pid} = ar_network_peer_sup:start_peering({IP,Port}, Options),
 			ets:insert(?MODULE, {{IP,Port}, Pid, undefined}),
 			monitor(process, Pid);
@@ -281,14 +358,21 @@ peering(IP, Port, Options)->
 
 peers_joined() ->
 	% returns list of {IP,Port}. example: [{{127,0,0,1}1984}]
-	ets:select(ar_network, [{{{'$1','$11'},'$2','$3'},[{is_pid, '$2'}],[{{'$1','$11'}}]}]).
-
+	ets:select(ar_network, [{{{'$1','$11'},'$2','$3'},
+							[{is_pid, '$2'}, {'=<', '$3', os:system_time(second)}],
+							[{{'$1','$11'}}]}]).
+peers_offline() ->
+	ets:select(ar_network, [{{{'$1','$11'},'$2','$3'},[{'==', false, {is_pid, '$2'}}],[{{'$1','$11'}}]}]).
 peer_went_offline(Pid, Reason) ->
 	T = os:system_time(second),
-	case ets:match(?MODULE, {'_',Pid,'_'}) of
-		[] ->
-			unknown;
-		[{{IP,Port}, Pid, Since}] ->
+	case ets:match(?MODULE, {'$1',Pid,'$2'}) of
+		[[]] ->
+			?LOG_ERROR("NOT FOUND PID ~p", [Pid]),
+			undefined;
+		[[{IP,Port}, undefined]] ->
+			% couldn't establish peering with this candidate
+			ets:insert(?MODULE, {{IP,Port}, undefined, T});
+		[[{IP,Port}, Since]] ->
 			LifeSpan = trunc((T - Since)/60),
 			?LOG_INFO("Peer ~p:~p went offline (~p). had peering during ~p minutes", [IP,Port, Reason, LifeSpan]),
 			ets:insert(?MODULE, {{IP,Port}, undefined, T})

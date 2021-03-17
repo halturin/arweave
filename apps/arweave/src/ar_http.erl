@@ -129,13 +129,14 @@ log(Type, Event, #{method := Method, peer := Peer, path := Path}, Reason) ->
 	{ok, Config} = application:get_env(arweave, config),
 	case lists:member(http_logging, Config#config.enable) of
 		true when Type == warn ->
-			?LOG_WARNING([
-				{event, Event},
-				{http_method, Method},
-				{peer, ar_util:format_peer(Peer)},
-				{path, Path},
-				{reason, Reason}
-			]);
+			ok;
+			%?LOG_WARNING([
+			%	{event, Event},
+			%	{http_method, Method},
+			%	{peer, ar_util:format_peer(Peer)},
+			%	{path, Path},
+			%	{reason, Reason}
+			%]);
 		true when Type == err ->
 			?LOG_ERROR([
 				{event, Event},

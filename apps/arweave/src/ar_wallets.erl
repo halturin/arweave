@@ -92,14 +92,14 @@ set_current(PrevRootHash, RootHash, RewardAddr, Height, PruneDepth) when is_bina
 %%% Generic server callbacks.
 %%%===================================================================
 
-init([{blocks, []}, {peers, _Peers}]) ->
+init([{blocks, []}]) ->
 	process_flag(trap_exit, true),
 	DAG = ar_diff_dag:new(<<>>, ar_patricia_tree:new(), not_set),
 	ar_node_worker ! wallets_ready,
 	{ok, DAG};
-init([{blocks, Blocks}, {peers, Peers}]) ->
+init([{blocks, Blocks}]) ->
 	process_flag(trap_exit, true),
-	gen_server:cast(?MODULE, {init, Blocks, Peers}), 
+	gen_server:cast(?MODULE, {init, Blocks}),
 	DAG = ar_diff_dag:new(<<>>, ar_patricia_tree:new(), not_set),
 	{ok, DAG}.
 
@@ -126,7 +126,7 @@ handle_call({get_chunk, RootHash, Cursor}, _From, DAG) ->
 					_ ->
 						ar_patricia_tree:get_range(Cursor, ?WALLET_LIST_CHUNK_SIZE + 1, Tree)
 				end,
-			{NextCursor, Range2} =	
+			{NextCursor, Range2} =
 				case length(Range) of
 					?WALLET_LIST_CHUNK_SIZE + 1 ->
 						{element(1, hd(Range)), tl(Range)};
@@ -230,11 +230,11 @@ handle_cast({write_wallet_list_chunk, RootHash, Cursor, Position}, DAG) ->
 	end,
 	{noreply, DAG};
 
-handle_cast({init, Blocks, Peers}, _) ->
+handle_cast({init, Blocks}, _) ->
 	InitialDepth = ?STORE_BLOCKS_BEHIND_CURRENT,
 	{DAG3, LastB, PrevWalletList} = lists:foldl(
 		fun (B, start) ->
-				Tree = get_tree(B, Peers),
+				Tree = get_tree(B),
 				{RootHash, UpdatedTree} =
 					ar_block:hash_wallet_list(B#block.height, B#block.reward_addr, Tree),
 				RootHash = B#block.wallet_list,
@@ -270,7 +270,7 @@ terminate(Reason, _State) ->
 %%% Private functions.
 %%%===================================================================
 
-get_tree(B, Peers) ->
+get_tree(B) ->
 	ID = B#block.wallet_list,
 	case ar_storage:read_wallet_list(ID) of
 		{ok, Tree} ->
@@ -278,26 +278,25 @@ get_tree(B, Peers) ->
 		_ ->
 			case B#block.height >= ar_fork:height_2_2() of
 				true ->
-					{ok, {Cursor, Chunk}} = ar_http_iface_client:get_wallet_list_chunk(Peers, ID),
+					{ok, {Cursor, Chunk}} = ar_network_http_client:get_wallet_list_chunk(ID),
 					{ok, Tree} = load_wallet_tree_from_peers(
 						ID,
-						Peers,
 						ar_patricia_tree:from_proplist(Chunk),
 						Cursor
 					),
 					Tree;
 				false ->
-					{ok, Tree} = ar_http_iface_client:get_wallet_list(Peers, B#block.indep_hash),
+					{ok, Tree} = ar_network_http_client:get_wallet_list(B#block.indep_hash),
 					Tree
 			end
 	end.
 
-load_wallet_tree_from_peers(_ID, _Peers, Acc, last) ->
+load_wallet_tree_from_peers(_ID, Acc, last) ->
 	{ok, Acc};
-load_wallet_tree_from_peers(ID, Peers, Acc, Cursor) ->
-	{ok, {NextCursor, Chunk}} = ar_http_iface_client:get_wallet_list_chunk(Peers, ID, Cursor),
+load_wallet_tree_from_peers(ID, Acc, Cursor) ->
+	{ok, {NextCursor, Chunk}} = ar_network_http_client:get_wallet_list_chunk(ID, Cursor),
 	Acc3 = lists:foldl(fun({K, V}, Acc2) -> ar_patricia_tree:insert(K, V, Acc2) end, Acc, Chunk),
-	load_wallet_tree_from_peers(ID, Peers, Acc3, NextCursor).
+	load_wallet_tree_from_peers(ID, Acc3, NextCursor).
 
 apply_block(DAG, NewB, RootHash, RewardPool, Height) ->
 	Tree = ar_diff_dag:reconstruct(DAG, RootHash, fun apply_diff/2),
