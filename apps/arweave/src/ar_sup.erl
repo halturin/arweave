@@ -7,6 +7,8 @@
 
 -behaviour(supervisor).
 
+-define(DEFAULT_COMMON_HANDLERS, 10).
+
 %% API
 -export([start_link/0]).
 
@@ -15,6 +17,7 @@
 
 %% Helper macro for declaring children of supervisor
 -define(CHILD(I, Type), {I, {I, start_link, []}, permanent, 5000, Type, [I]}).
+-define(CHILD(I, Type, Args), {I, {I, start_link, Args}, permanent, 5000, Type, [I]}).
 
 %% ===================================================================
 %% API functions
@@ -45,18 +48,20 @@ init([]) ->
 	ets:new(node_state, [set, public, named_table]),
 	ets:new(ar_rating, [set, public, named_table]),
 	ets:new(ar_network, [set, public, named_table]),
+	ets:new(ar_network_handler, [set, public, named_table]),
 	{ok, {{one_for_one, 5, 10}, [
 		?CHILD(ar_disksup, worker),
 		?CHILD(ar_meta_db, worker),
 		?CHILD(ar_arql_db, worker),
 		?CHILD(ar_events_sup, supervisor),
 		?CHILD(ar_rating, worker),
-		?CHILD(ar_node_worker, worker),
 		?CHILD(ar_network_sup, supervisor),
+		?CHILD(ar_network_handler_sup, supervisor, [?DEFAULT_COMMON_HANDLERS]),
 		?CHILD(ar_watchdog, worker),
 		?CHILD(ar_tx_blacklist, worker),
 		?CHILD(ar_bridge, worker),
 		?CHILD(ar_header_sync, worker),
 		?CHILD(ar_data_sync, worker),
+		?CHILD(ar_node_worker, worker),
 		?CHILD(ar_poller, worker)
 	]}}.

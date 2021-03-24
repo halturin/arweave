@@ -278,7 +278,7 @@ get_tree(B) ->
 		_ ->
 			case B#block.height >= ar_fork:height_2_2() of
 				true ->
-					{ok, {Cursor, Chunk}} = ar_network_http_client:get_wallet_list_chunk(ID),
+					{ok, {Cursor, Chunk}} = ar_network:get_wallet_list_chunk(ID),
 					{ok, Tree} = load_wallet_tree_from_peers(
 						ID,
 						ar_patricia_tree:from_proplist(Chunk),
@@ -286,7 +286,7 @@ get_tree(B) ->
 					),
 					Tree;
 				false ->
-					{ok, Tree} = ar_network_http_client:get_wallet_list(B#block.indep_hash),
+					{ok, Tree} = ar_network:get_wallet_list(B#block.indep_hash),
 					Tree
 			end
 	end.
@@ -294,7 +294,7 @@ get_tree(B) ->
 load_wallet_tree_from_peers(_ID, Acc, last) ->
 	{ok, Acc};
 load_wallet_tree_from_peers(ID, Acc, Cursor) ->
-	{ok, {NextCursor, Chunk}} = ar_network_http_client:get_wallet_list_chunk(ID, Cursor),
+	{ok, {NextCursor, Chunk}} = ar_network:get_wallet_list_chunk(ID, Cursor),
 	Acc3 = lists:foldl(fun({K, V}, Acc2) -> ar_patricia_tree:insert(K, V, Acc2) end, Acc, Chunk),
 	load_wallet_tree_from_peers(ID, Acc3, NextCursor).
 

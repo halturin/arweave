@@ -23,7 +23,14 @@
 -export([
 	broadcast/2,
 	broadcast/3,
-	add_peer_candidate/2
+	add_peer_candidate/2,
+	is_connected/0,
+
+	% requests to the peer
+	get_current_block/0,
+	get_wallet_list/1,
+	get_wallet_list_chunk/1,
+	get_wallet_list_chunk/2
 ]).
 
 -include_lib("arweave/include/ar.hrl").
@@ -80,7 +87,6 @@ broadcast(block, Block, To) when is_list(To) ->
 broadcast(tx, TX, To) when is_list(To) ->
 	gen_server:call(?MODULE, {broadcast, tx, TX, self(), To}).
 
-
 %% @doc
 %% add_peer_candidate adds a record with given IP address and Port number for the
 %% future peering. Ignore private networks.
@@ -96,10 +102,27 @@ add_peer_candidate({A,B,C,D} = IP, Port) when Port > 0, Port < 65536,
 											C > -1, C < 256,
 											D > -1, D < 256 ->
 	% do not overwrite if its already exist
-	ets:insert_new(?MODULE, {{IP, Port}, undefined, undefined});
+	% {{IP,Port}, Pid, Timestamp, PeerID}
+	ets:insert_new(?MODULE, {{IP, Port}, undefined, undefined, undefined});
 %% ignore any garbage
 add_peer_candidate(_IP, _Port) -> false.
 
+%% @doc
+%% Returns whether the node is connected to the network or not.
+%% true - has at least one peering connection
+%% false - has no peering connections at all
+%% @end
+is_connected() ->
+	length(peers_joined()) > 0.
+
+get_current_block() ->
+	request({get_current_block, []}, {1, 10}).
+get_wallet_list(Hash) ->
+	request({get_wallet_list, Hash}, {1, 10}).
+get_wallet_list_chunk(ID) ->
+	request({get_wallet_list_chunk, ID}, {1, 10}).
+get_wallet_list_chunk(ID, Cursor) ->
+	request({get_wallet_list_chunk, {ID, Cursor}}, {1, 10}).
 %%--------------------------------------------------------------------
 %% @doc
 %% Starts the server
@@ -207,7 +230,9 @@ handle_cast(peering, State) ->
 			% get all offline peers. the same format [{IP, Port}]
 			OfflinePeers = peers_offline(),
 			% transform list of joined peers into the same format [{IP, Port}]
-			OnlinePeers = lists:foldl(fun(P,M) -> maps:put(P,ok,M) end, #{}, Peers),
+			OnlinePeers = lists:foldl(fun({IP,Port,_Pid},M) ->
+				maps:put({IP,Port},ok,M)
+			end, #{}, Peers),
 			% merge them all together (excluding already joined peers) into
 			% the Candidates list.
 			{Candidates,_} = lists:foldl(fun(P,{L,M}) ->
@@ -272,16 +297,16 @@ handle_info({event, peer, {joined, PeerID, IP, Port}}, State) ->
 		[] ->
 			?LOG_ERROR("internal error. got event joined from unknown peer",[{IP, Port, PeerID}]),
 			{noreply, State};
-		[{{IP,Port}, Pid, undefined}] when length(Joined) == 0 ->
+		[{{IP,Port}, Pid, undefined, _}] when length(Joined) == 0 ->
 			?LOG_ERROR("0000000000000000 peer FIRST joined "),
-			ar_events:send(network, joined),
+			ar_events:send(network, connected),
 			T = os:system_time(second),
-			ets:insert(?MODULE, {{IP,Port}, Pid, T}),
+			ets:insert(?MODULE, {{IP,Port}, Pid, T, PeerID}),
 			{noreply, State};
-		[{{IP,Port}, Pid, undefined}] ->
+		[{{IP,Port}, Pid, undefined, _}] ->
 			?LOG_ERROR("0000000000000000 peer N ~p joined ", [length(Joined)]),
 			T = os:system_time(second),
-			ets:insert(?MODULE, {{IP,Port}, Pid, T}),
+			ets:insert(?MODULE, {{IP,Port}, Pid, T, PeerID}),
 			{noreply, State}
 	end;
 handle_info({'DOWN', _Ref, process, Pid, Reason}, State) ->
@@ -289,7 +314,7 @@ handle_info({'DOWN', _Ref, process, Pid, Reason}, State) ->
 	peer_went_offline(Pid, Reason),
 	case peers_joined() of
 		[] ->
-			ar_events:send(network, left),
+			ar_events:send(network, disconnected),
 			gen_server:cast(?MODULE, join),
 			{noreply, State};
 		_ ->
@@ -336,44 +361,108 @@ peering(IP, Port, Options)->
 		[] ->
 			% first time connects with this peer
 			{ok, Pid} = ar_network_peer_sup:start_peering({IP,Port}, Options),
-			ets:insert(?MODULE, {{IP,Port}, Pid, undefined}),
+			ets:insert(?MODULE, {{IP,Port}, Pid, undefined, undefined}),
 			monitor(process, Pid);
-		[{{IP,Port}, undefined, undefined}] ->
+		[{{IP,Port}, undefined, undefined, undefined}] ->
 			% peer is the candidate. got it from another peer
 			{ok, Pid} = ar_network_peer_sup:start_peering({IP,Port}, Options),
-			ets:insert(?MODULE, {{IP,Port}, Pid, undefined}),
+			ets:insert(?MODULE, {{IP,Port}, Pid, undefined, undefined}),
 			monitor(process, Pid);
-		[{{IP,Port}, undefined, Since}] when (T - Since)/60 > SleepTime ->
+		[{{IP,Port}, undefined, Since, _PeerID}] when (T - Since)/60 > SleepTime ->
 			% peer was offline, but longer than given SleepTime
 			{ok, Pid} = ar_network_peer_sup:start_peering({IP,Port}, Options),
-			ets:insert(?MODULE, {{IP,Port}, Pid, undefined}),
+			ets:insert(?MODULE, {{IP,Port}, Pid, undefined, undefined}),
 			monitor(process, Pid);
-		[{{_IP,_Port}, undefined, Since}] ->
+		[{{_IP,_Port}, undefined, Since, _PeerID}] ->
 			% peer is offline. let him sleep.
 			{offline, Since};
-		[{{_IP,_Port}, Pid, _Since}] when is_pid(Pid) ->
+		[{{_IP,_Port}, Pid, _Since, _PeerID}] when is_pid(Pid) ->
 			% trying to start peering with the peer we already have peering
 			already_started
 	end.
 
 peers_joined() ->
-	% returns list of {IP,Port}. example: [{{127,0,0,1}1984}]
-	ets:select(ar_network, [{{{'$1','$11'},'$2','$3'},
+	% returns list of {IP, Port, Pid}. example: [{{127,0,0,1}, 1984, <0.12.123>}]
+	% where Pid - is a peering process handler (module: ar_network_peer)
+	ets:select(ar_network, [{{{'$1','$11'},'$2','$3','$4'},
 							[{is_pid, '$2'}, {'=<', '$3', os:system_time(second)}],
-							[{{'$1','$11'}}]}]).
+							[{{'$1','$11', '$2'}}]}]).
 peers_offline() ->
-	ets:select(ar_network, [{{{'$1','$11'},'$2','$3'},[{'==', false, {is_pid, '$2'}}],[{{'$1','$11'}}]}]).
+	ets:select(ar_network, [{{{'$1','$11'},'$2','$3','$4'},[{'==', false, {is_pid, '$2'}}],[{{'$1','$11'}}]}]).
 peer_went_offline(Pid, Reason) ->
 	T = os:system_time(second),
-	case ets:match(?MODULE, {'$1',Pid,'$2'}) of
+	case ets:match(?MODULE, {'$1',Pid,'$2','$3'}) of
 		[[]] ->
 			?LOG_ERROR("NOT FOUND PID ~p", [Pid]),
 			undefined;
-		[[{IP,Port}, undefined]] ->
+		[[{IP,Port}, undefined, _PeerID]] ->
 			% couldn't establish peering with this candidate
 			ets:insert(?MODULE, {{IP,Port}, undefined, T});
-		[[{IP,Port}, Since]] ->
+		[[{IP,Port}, Since, PeerID]] ->
 			LifeSpan = trunc((T - Since)/60),
 			?LOG_INFO("Peer ~p:~p went offline (~p). had peering during ~p minutes", [IP,Port, Reason, LifeSpan]),
-			ets:insert(?MODULE, {{IP,Port}, undefined, T})
+			ar_events:send(peer, {left, PeerID}),
+			ets:insert(?MODULE, {{IP,Port}, undefined, T, undefined})
 	end.
+
+request({Request, Args}, {T, Max}) ->
+	Peers = lists:sublist(peers_joined(), Max),
+	request({Request, Args}, T, Peers).
+
+request({Request, Args}, first, Peers) ->
+	case do_request({Request, Args}, Peers, 1, 5000) of
+		[Reply] ->
+			Reply;
+		_ ->
+			error
+	end;
+request({Request, Args}, all, Peers) ->
+	do_request({Request, Args}, Peers, length(Peers), 5000).
+
+do_request({Request, Args}, Peers, N, Timeout) ->
+	Origin = self(),
+	Receiver = spawn(do_spawn_receive(Origin, {Request, Args}, Peers, N, Timeout)),
+	receive
+		Result ->
+		exit(Receiver, normal),
+			Result
+	after Timeout*3 ->
+		exit(Receiver, timeout),
+		timeout
+	end.
+
+% We could use async way (without spawning a lot of processes)
+% just using erlang:send(Pid, {'$gen_call', {Ref,From}, Reqests})
+% and collecting the replies with accoring Ref. I wouldn't say it
+% more tricky, but spawning is simpler and a process in Erlang VM
+% is a pretty cheap thing.
+do_spawn_receive(Origin, {Request, Args}, Peers, N, Timeout) ->
+	Receiver = self(),
+	lists:map(fun({IP, Port, Pid}) ->
+		spawn_link(fun() ->
+			case catch gen_server:call(Pid, {request, Request, Args}, Timeout) of
+				{'EXIT', {timeout, _}} ->
+					Receiver ! error;
+				{'EXIT', Error} ->
+					?LOG_ERROR("Something went wrong during request to the peer ~p:~p (~p): ~p",
+							   [IP, Port, Pid, Error]);
+			Result ->
+				Receiver ! Result
+			end
+		end)
+	end, Peers),
+	Origin ! do_receive(N, [], Timeout).
+
+do_receive(0, Acc, _Timeout) ->
+	Acc;
+do_receive(N, Acc, Timeout) ->
+	receive
+		{result, Result} ->
+			do_receive(N-1, [Result|Acc], Timeout);
+		_ ->
+			do_receive(N-1, [error|Acc], Timeout)
+	after Timeout*2 ->
+			do_receive(N-1, [timeout|Acc], Timeout)
+	end.
+
+

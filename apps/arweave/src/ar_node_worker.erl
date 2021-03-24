@@ -61,12 +61,20 @@ start_link() ->
 init([]) ->
 	process_flag(trap_exit, true),
 	ok = ar_events:subscribe(network),
+	case ar_network:is_connected() of
+		true ->
+			% if already joined (connected) we should
+			% emulate this event in order to initialize the process state
+			?MODULE ! {event, network, joined};
+		_ ->
+			ok
+	end,
 	%% Initialize RandomX.
 	ar_randomx_state:start(),
 	ar_randomx_state:start_block_polling(),
 	%% Read persisted mempool.
 	load_mempool(),
-	{ok, #{}}.
+	{ok, undefined}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -144,8 +152,8 @@ handle_cast(Message, #{ task_queue := TaskQueue } = State) ->
 %%									 {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_info({event, network, joined}, #{}) ->
-	?LOG_ERROR("0000000000000000 network joined"),
+handle_info({event, network, connected}, undefined) ->
+	?LOG_INFO("Connected to the network."),
 	%% Join the node.
 	{ok, Config} = application:get_env(arweave, config),
 	BI =
@@ -178,11 +186,17 @@ handle_info({event, network, joined}, #{}) ->
 	case {BI, Config#config.auto_join} of
 		{not_joined, true} ->
 			ar_join:start(self(), Config#config.peers);
+		{[#block{} = GenesisB], true} ->
+			BI = [ar_util:block_index_entry_from_block(GenesisB)],
+			ar_randomx_state:init(BI, []),
+			?MODULE ! {join, BI, [GenesisB]};
 		{BI, true} ->
-			start_from_block_index(BI);
+			ar_randomx_state:init(BI, []),
+			?MODULE ! {join, BI, read_recent_blocks(BI)};
 		{_, false} ->
 			do_nothing
 	end,
+
 	Gossip = ar_gossip:init([
 		whereis(ar_bridge),
 		%% Attach webhook listeners to the internal gossip network.
@@ -214,7 +228,7 @@ handle_info({event, network, joined}, #{}) ->
 	]),
 	%% Start the HTTP server.
 	ok = ar_http_iface_server:start(),
-	{noreply, #{
+	State = #{
 		miner => undefined,
 		automine => false,
 		tags => [],
@@ -223,14 +237,15 @@ handle_info({event, network, joined}, #{}) ->
 		blocks_missing_txs => sets:new(),
 		missing_txs_lookup_processes => #{},
 		task_queue => gb_sets:new()
-	}};
+	},
+	{noreply, State};
 
-handle_info({event, network, joined}, State) ->
-	?LOG_ERROR("0000000000000000 network rejoined"),
-	% reconnected. do nothing.
+handle_info({event, network, connected}, State) ->
+	?LOG_INFO("Reconnected to the network."),
+	% rejoined to the network. do nothing.
 	{noreply, State};
 handle_info({event, network, left}, State) ->
-	?LOG_ERROR("0000000000000000 network left"),
+	?LOG_ERROR("Disconnected from the network. Trying to reconnect..."),
 	{noreply, State};
 
 handle_info(Info, State) when is_record(Info, gs_msg) ->
@@ -1091,13 +1106,6 @@ read_hash_list_2_0_for_1_0_blocks() ->
 			[]
 	end.
 
-start_from_block_index([#block{} = GenesisB]) ->
-	BI = [ar_util:block_index_entry_from_block(GenesisB)],
-	ar_randomx_state:init(BI, []),
-	self() ! {join, BI, [GenesisB]};
-start_from_block_index(BI) ->
-	ar_randomx_state:init(BI, []),
-	self() ! {join, BI, read_recent_blocks(BI)}.
 
 read_recent_blocks(not_joined) ->
 	[];

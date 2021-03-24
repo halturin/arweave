@@ -111,12 +111,6 @@
 		% Exceeding the limit of 60 requests per 1 minute
 		% decreases rate by 10 points.
 		{request, tx} => {60, 60, penalty, 10},
-		% If we got timeout few times we should handle it as a peer
-		% disconnection with removing it from the rating. We also
-		% have to inform the other processes that its went offline.
-		% Once the last peer went offline this node should handle
-		% the disconnection process from the arweave network.
-		{response, connect_timeout} => {5, 300, offline, 0},
 		% Instant ban for the attack (for the next 24 hours).
 		{attack, any} => {1, 0, ban, 1440}
 	},
@@ -338,9 +332,6 @@ handle_info({event, peer, {Act, Kind, Request}}, State)
 					ets:insert(?MODULE, {{peer, Peer}, Rating1}),
 					update_rating(Peer, State#state.db),
 					{noreply, State};
-				{_ExtraRate, offline} ->
-					% do nothing
-					{noreply, State};
 				{ExtraRate, History1} ->
 					R1 = R + Rate + ExtraRate,
 					RG = maps:put({Act, Positive}, {R1, History1}, Rating#rating.rate_group),
@@ -464,13 +455,7 @@ trigger({N, P, Trigger, V}, Peer, History, T) ->
 		_ when Trigger == bonus ->
 			{V, History1};
 		_ when Trigger == penalty ->
-			{-V, History1};
-		_ when Trigger == offline ->
-			% remove it from the ETS so the rest of the
-			% events in the mailbox will be ignored
-			ets:delete(?MODULE, {peer, Peer}),
-			ar_events:send(peer, {left, Peer}),
-			{0, offline}
+			{-V, History1}
 	end.
 
 

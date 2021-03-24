@@ -22,6 +22,7 @@
 
 -include_lib("arweave/include/ar.hrl").
 -include_lib("arweave/include/ar_config.hrl").
+-include_lib("arweave/include/ar_rating.hrl").
 
 %% Internal state definition.
 -record(state, {
@@ -34,7 +35,8 @@
 	peer_id,
 	peers = #{}, % map of peers
 	validate_time = true,
-	fails = 0
+	fails = 0,
+	module = ar_network_http_client % default mode is stateless
 }).
 
 %%%===================================================================
@@ -98,6 +100,33 @@ init({{IP,Port}, Options}) ->
 %%									 {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_call({request, Request, Args}, _From, State) when is_atom(Request) ->
+	T = os:system_time(millisecond),
+	case catch (State#state.module):Request(State#state.peer_ipport, Args) of
+		{ok, Value} ->
+			EventType = get_event_type(Request),
+			Event = #event_peer{
+				peer = State#state.peer_id,
+				time = os:system_time(millisecond) - T
+			},
+			ar_events:send(peer, {response, EventType, Event}),
+			{reply, {result, Value}, State};
+		{error, timeout} ->
+			Event = #event_peer{
+				peer = State#state.peer_id
+			},
+			ar_events:send(peer, {response, request_timeout, Event});
+		Error ->
+			% seems like malformed response. we couldn't serialize from JSON
+			Event = #event_peer{
+				peer = State#state.peer_id
+			},
+			ar_events:send(peer, {response, malformed, Event}),
+			?LOG_ERROR("Call '~p:~p'(peer id:~p) failed: ~p",
+					   [State#state.module, Request, State#state.peer_id, Error]),
+			{reply, error, State}
+	end;
+
 handle_call(Request, _From, State) ->
 	?LOG_ERROR("unhandled call: ~p", [Request]),
 	{reply, ok, State}.
@@ -114,14 +143,16 @@ handle_call(Request, _From, State) ->
 %%--------------------------------------------------------------------
 handle_cast(_Msg, State) when State#state.fails > 3 ->
 	{stop, normal, State};
+
 handle_cast(validate_network, State) ->
-	case ar_network_http_client:get_info(State#state.peer_ipport) of
+	case (State#state.module):get_info(State#state.peer_ipport, {}) of
 		Info when is_list(Info) ->
 			validate_network(Info,State);
 		_ ->
 			timer:send_after(5000, {'$gen_cast', validate_network}),
 			{noreply, State#state{fails = State#state.fails + 1}}
 	end;
+
 handle_cast(validate_time, State) when State#state.validate_time == false ->
 	Joined = {joined,
 		State#state.peer_id,
@@ -131,9 +162,16 @@ handle_cast(validate_time, State) when State#state.validate_time == false ->
 	ar_events:send(peer, Joined),
 	?LOG_ERROR("0000000000000000 ~p just joined", [State#state.peer_ipport]),
 	gen_server:cast(self(), get_peers),
+	Args = #{
+		peer_id => State#state.peer_id,
+		peer_ip => State#state.peer_ip,
+		peer_port => State#state.peer_port
+	},
+	ar_network_handler_sup:start_link(3, Args),
 	{noreply, State#state{fails = 0}};
+
 handle_cast(validate_time, State) ->
-	case ar_network_http_client:get_time(State#state.peer_ipport, 5 * 1000) of
+	case (State#state.module):get_time(State#state.peer_ipport) of
 		{ok, {RemoteTMin, RemoteTMax}} ->
 			LocalT = os:system_time(second),
 			Tolerance = ?JOIN_CLOCK_TOLERANCE,
@@ -164,10 +202,11 @@ handle_cast(validate_time, State) ->
 			timer:send_after(5000, {'$gen_cast', validate_time}),
 			{noreply, State#state{fails = State#state.fails + 1}}
 	end;
+
 handle_cast(get_peers, State) ->
 	timer:send_after(60000, {'$gen_cast', get_peers}),
 	Now = os:system_time(second),
-	case ar_network_http_client:get_peers(State#state.peer_ipport) of
+	case ar_network_http_client:get_peers(State#state.peer_ipport, {}) of
 		_Peers when State#state.lifespan < Now ->
 			?LOG_ERROR("0000000000000000 ~p time to die", [State#state.peer_ipport]),
 			{stop, normal, State};
@@ -179,6 +218,7 @@ handle_cast(get_peers, State) ->
 		_ ->
 			{noreply, State}
 	end;
+
 handle_cast(Msg, State) ->
 	?LOG_ERROR([{event, unhandled_cast}, {module, ?MODULE}, {message, Msg}]),
 	{noreply, State}.
@@ -227,7 +267,7 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 validate_network(Info, State) ->
-	PeerID = State#state.peer_id,
+	PeerID = list_to_binary(lists:flatten(io_lib:format("~p",[State#state.peer_ipport]))),
 	case proplists:get_value(name, Info) of
 		<<?NETWORK_NAME>> ->
 			State1 = State#state{
@@ -245,3 +285,11 @@ log_peer_clock_diff(Peer, Diff) ->
 	WarningArgs = [ar_util:format_peer(Peer), Diff],
 	io:format(Warning, WarningArgs),
 	?LOG_WARNING(Warning, WarningArgs).
+
+% transform Request method into the event name in order to rate this action
+% for the peer
+get_event_type(get_block) -> block;
+get_event_type(get_tx) -> tx;
+get_event_type(get_chunk) -> chunk;
+get_event_type(_Request) -> unknown.
+

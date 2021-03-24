@@ -30,7 +30,7 @@ init([]) ->
 	{ok, {{one_for_one, 5, 10}, [
 		% events: ready/maintanence
 		?CHILD(ar_events, node, worker),
-		% events: joined (got at leats one peer) / left (lost the last peer)
+		% events: connected (got at leats one peer) / disconnected (lost the last peer)
 		?CHILD(ar_events, network, worker),
 		% events: joined/left/request (income requests)/response (for our requests)
 		?CHILD(ar_events, peer, worker),
