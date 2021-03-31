@@ -55,6 +55,7 @@ init([]) ->
 		?CHILD(ar_arql_db, worker),
 		?CHILD(ar_events_sup, supervisor),
 		?CHILD(ar_rating, worker),
+		?CHILD(ar_node_join, worker),
 		?CHILD(ar_network_sup, supervisor),
 		?CHILD(ar_network_handler_sup, supervisor, [?DEFAULT_COMMON_HANDLERS]),
 		?CHILD(ar_watchdog, worker),

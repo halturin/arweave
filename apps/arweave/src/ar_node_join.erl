@@ -21,44 +21,21 @@
 	code_change/3
 ]).
 
--export([
-	randomx_state_by_height/1,
-	hash/2
-]).
+-export([]).
 
 -include_lib("arweave/include/ar.hrl").
 -include_lib("arweave/include/ar_config.hrl").
 
 -record(state, {
+	joining = false,
+	connected = false,
+	blocks = []
 }).
 
 %%%===================================================================
 %%% API
 %%%===================================================================
 
-
-hash(Height, Data) ->
-	case randomx_state_by_height(Height) of
-		{state, {fast, FastState}} ->
-			ar_mine_randomx:hash_fast(FastState, Data);
-		{state, {light, LightState}} ->
-			ar_mine_randomx:hash_light(LightState, Data);
-		{key, Key} ->
-			LightState = ar_mine_randomx:init_light(Key),
-			ar_mine_randomx:hash_light(LightState, Data)
-	end.
-
-randomx_state_by_height(Height) when is_integer(Height) andalso Height >= 0 ->
-	case gen_server:call(?MODULE, {get_state_by_height, Height}) of
-		{state_not_found, key_not_found} ->
-			SwapHeight = 1, %swap_height(Height),
-			{ok, Key} = randomx_key(SwapHeight),
-			{key, Key};
-		{state_by_height, {state_not_found, Key}} ->
-			{key, Key};
-		{state_by_height, {ok, NodeState}} ->
-			{state, NodeState}
-	end.
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -85,8 +62,10 @@ start_link() ->
 %% @end
 %%--------------------------------------------------------------------
 init([]) ->
-	gen_server:cast(?MODULE, poll_new_blocks),
-	{ok, #state{}}.
+	ar_events:subscribe(network),
+	Connected = ar_network:is_connected(),
+	gen_server:cast(?MODULE, join),
+	{ok, #state{connected = Connected}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -116,6 +95,123 @@ handle_call(Request, _From, State) ->
 %%									{stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_cast(join, State) ->
+	?LOG_ERROR("111111111111111 join..."),
+	{ok, Config} = application:get_env(arweave, config),
+	BI =
+		case {Config#config.start_from_block_index, Config#config.init} of
+			{false, false} ->
+				not_joined;
+			{true, _} ->
+				case ar_storage:read_block_index() of
+					{error, enoent} ->
+						io:format(
+							"~n~n\tBlock index file is not found. "
+							"If you want to start from a block index copied "
+							"from another node, place it in "
+							"<data_dir>/hash_lists/last_block_index.json~n~n"
+						),
+						erlang:halt();
+					BI2 ->
+						BI2
+				end;
+			{false, true} ->
+				Config2 = Config#config{ init = false },
+				application:set_env(arweave, config, Config2),
+				ar_weave:init(
+					ar_util:genesis_wallets(),
+					ar_retarget:switch_to_linear_diff(Config#config.diff),
+					0,
+					ar_storage:read_tx(ar_weave:read_v1_genesis_txs())
+				)
+		end,
+	case {BI, Config#config.auto_join} of
+		{not_joined, true} ->
+			gen_server:cast(?MODULE, joining),
+			{noreply, State#state{joining = true}};
+		{[#block{} = GenesisB], true} ->
+			BI = [ar_util:block_index_entry_from_block(GenesisB)],
+			ar_node_state:init(BI),
+			ar_events:send(node, {joined, BI, [GenesisB]}),
+			{stop, normal, State};
+		{BI, true} ->
+			ar_node_state:init(BI),
+			Blocks = read_recent_blocks(BI),
+			ar_events:send(node, {joined, BI, Blocks}),
+			{stop, normal, State};
+		{_, false} ->
+			{stop, normal, State}
+	end;
+
+handle_cast(joining, State) when State#state.connected == false ->
+	?LOG_ERROR("111111111111111 joining (not connected) ..."),
+	%% do nothing. waiting for the {event, network, connected}
+	{noreply, State};
+
+handle_cast(joining, State) when State#state.connected ->
+	?LOG_ERROR("111111111111111 joining ..."),
+	case ar_network:get_current_block_index() of
+		[] ->
+			?LOG_ERROR("111111111111111 joining ... []"),
+			timer:send_after(?REJOIN_TIMEOUT, {'$gen_cast', joining}),
+			{noreply, State};
+		BI ->
+			{Hash, _, _} = hd(BI),
+			ar:console("Fetching current block... ~p~n", [{hash, ar_util:encode(Hash)}]),
+			case ar_network:get_block(Hash) of
+				{error, _} ->
+					ar:console(
+						"Did not manage to fetch current block from any of the peers. Will retry later.~n"
+					),
+					timer:send_after(?REJOIN_TIMEOUT, {'$gen_cast', joining}),
+					{noreply, State};
+				B ->
+					ar:console("Joining the Arweave network...~n"),
+					%% Get a block, and its 2 * ?MAX_TX_ANCHOR_DEPTH previous blocks.
+					%% If the block list is shorter than 2 * ?MAX_TX_ANCHOR_DEPTH, simply
+					%% get all existing blocks.
+					%%
+					%% The node needs 2 * ?MAX_TX_ANCHOR_DEPTH block anchors so that it
+					%% can validate transactions even if it enters a ?MAX_TX_ANCHOR_DEPTH-deep
+					%% fork recovery (which is the deepest fork recovery possible) immediately after
+					%% joining the network.
+					Behind = 2 * ?MAX_TX_ANCHOR_DEPTH,
+					gen_server:cast({trail_blocks, Behind, B, BI}, State),
+					{noreply, State#state{blocks = []}}
+			end
+	end;
+
+handle_cast({trail_blocks, Behind, B, BI}, State) when State#state.connected == false ->
+	?LOG_ERROR("111111111111111 trailing (not connected) ... []"),
+	Message = {trail_blocks, Behind, B, BI},
+	erlang:send_after(?REJOIN_TIMEOUT, {'$gen_cast', Message}),
+	{noreply, State};
+
+handle_cast({trail_blocks, Behind, B, BI}, State) when Behind == 0; B#block.height == 0 ->
+	?LOG_ERROR("111111111111111 trailing ... done "),
+	ar_arql_db:populate_db(?BI_TO_BHL(BI)),
+	ar_node_state:init(BI),
+	ar_events:send(node, {joined, BI, State#state.blocks}),
+	ar:console("Joined the Arweave network successfully.~n");
+
+handle_cast({trail_blocks, Behind, B, BI}, State) ->
+	?LOG_ERROR("111111111111111 trailing ... ~p", [Behind]),
+	PreviousB = ar_network:get_block(B#block.previous_block),
+	case ?IS_BLOCK(PreviousB) of
+		true ->
+			SizeTaggedTXs = ar_block:generate_size_tagged_list_from_txs(B#block.txs),
+			Blocks = [B#block{ size_tagged_txs = SizeTaggedTXs } | State#state.blocks],
+			gen_server:cast(?MODULE, {trail_blocks, Behind-1, PreviousB, BI}),
+			{noreply, State#state{blocks = Blocks}};
+		false ->
+			?LOG_INFO(
+				[{event, could_not_retrieve_joining_block}]
+			),
+			Message = {trail_blocks, Behind, B, BI},
+			erlang:send_after(?REJOIN_TIMEOUT, {'$gen_cast', Message}),
+			{noreply, State}
+	end;
+
 handle_cast(Msg, State) ->
 	?LOG_ERROR([{event, unhandled_cast}, {module, ?MODULE}, {message, Msg}]),
 	{noreply, State}.
@@ -130,6 +226,16 @@ handle_cast(Msg, State) ->
 %%									 {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_info({event, network, connected}, State) when State#state.joining ->
+	gen_server:cast(?MODULE, joining),
+	{noreply, State#state{connected = true}};
+
+handle_info({event, network, connected}, State) ->
+	{noreply, State#state{connected = true}};
+
+handle_info({event, network, disconnected}, State) ->
+	{noreply, State#state{connected = false}};
+
 handle_info(Info, State) ->
 	?LOG_ERROR([{event, unhandled_info}, {module, ?MODULE}, {info, Info}]),
 	{noreply, State}.
@@ -163,66 +269,17 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+read_recent_blocks(not_joined) ->
+	[];
+read_recent_blocks(BI) ->
+	read_recent_blocks2(lists:sublist(BI, 2 * ?MAX_TX_ANCHOR_DEPTH)).
 
-%% @doc Return the key used in RandomX by key swap height. The key is the
-%% dependent hash from the block at the previous swap height. If RandomX is used
-%% already by the first ?RANDOMX_KEY_SWAP_FREQ blocks, then a hardcoded key is
-%% used since there is no old enough block to fetch the key from.
-randomx_key(SwapHeight) when SwapHeight < ?RANDOMX_KEY_SWAP_FREQ ->
-	{ok, <<"Arweave Genesis RandomX Key">>};
-randomx_key(SwapHeight) ->
-	KeyBlockHeight = SwapHeight - ?RANDOMX_KEY_SWAP_FREQ,
-	case get_block(KeyBlockHeight) of
-		{ok, KeyB} ->
-			Key = KeyB#block.hash,
-			whereis(?MODULE) ! {cache_randomx_key, SwapHeight, Key},
-			{ok, Key};
-		unavailable ->
-			unavailable
-	end.
-randomx_key(SwapHeight, _, _) when SwapHeight < ?RANDOMX_KEY_SWAP_FREQ ->
-	randomx_key(SwapHeight);
-randomx_key(SwapHeight, BI, Peers) ->
-	KeyBlockHeight = SwapHeight - ?RANDOMX_KEY_SWAP_FREQ,
-	case get_block(KeyBlockHeight, BI, Peers) of
-		{ok, KeyB} ->
-			{ok, KeyB#block.hash};
-		unavailable ->
-			unavailable
-	end.
+read_recent_blocks2([]) ->
+	[];
+read_recent_blocks2([{BH, _, _} | BI]) ->
+	B = ar_storage:read_block(BH),
+	TXs = ar_storage:read_tx(B#block.txs),
+	SizeTaggedTXs = ar_block:generate_size_tagged_list_from_txs(TXs),
+	[B#block{ size_tagged_txs = SizeTaggedTXs, txs = TXs } | read_recent_blocks2(BI)].
 
-get_block(Height) ->
-	case ar_node:get_block_index() of
-		[] -> unavailable;
-		BI ->
-			{BH, _, _} = lists:nth(Height + 1, lists:reverse(BI)),
-			get_block(BH, BI)
-	end.
 
-get_block(BH, BI) ->
-	Peers = ar_bridge:get_remote_peers(),
-	get_block(BH, BI, Peers).
-
-get_block(Height, BI, Peers) when is_integer(Height) ->
-	{BH, _, _} = lists:nth(Height + 1, lists:reverse(BI)),
-	get_block(BH, BI, Peers);
-get_block(BH, BI, Peers) ->
-	case ar_http_iface_client:get_block(Peers, BH) of
-		unavailable ->
-			unavailable;
-		B ->
-			case ar_weave:indep_hash(B) of
-				BH ->
-					SizeTaggedTXs = ar_block:generate_size_tagged_list_from_txs(B#block.txs),
-					ar_data_sync:add_block(B, SizeTaggedTXs),
-					ar_header_sync:add_block(B),
-					{ok, B};
-				InvalidBH ->
-					?LOG_WARNING([
-						{event, ar_randomx_state_got_invalid_block},
-						{requested_block_hash, ar_util:encode(BH)},
-						{received_block_hash, ar_util:encode(InvalidBH)}
-					]),
-					get_block(BH, BI)
-			end
-	end.

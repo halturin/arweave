@@ -115,7 +115,8 @@ handle_call({request, Request, Args}, _From, State) when is_atom(Request) ->
 			Event = #event_peer{
 				peer = State#state.peer_id
 			},
-			ar_events:send(peer, {response, request_timeout, Event});
+			ar_events:send(peer, {response, request_timeout, Event}),
+			{reply, timeout, State};
 		Error ->
 			% seems like malformed response. we couldn't serialize from JSON
 			Event = #event_peer{
@@ -194,10 +195,10 @@ handle_cast(validate_time, State) ->
 					gen_server:cast(self(), validate_time),
 					{noreply, State#state{validate_time = false}}
 			end;
-		{error, Err} ->
+		error ->
 			ar:console(
-				"Failed to get time from peer ~s: ~p.",
-				[ar_util:format_peer(State#state.peer_ipport), Err]
+				"Failed to get time from peer ~s",
+				[ar_util:format_peer(State#state.peer_ipport)]
 			),
 			timer:send_after(5000, {'$gen_cast', validate_time}),
 			{noreply, State#state{fails = State#state.fails + 1}}

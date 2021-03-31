@@ -28,7 +28,7 @@ start_link() ->
 
 init([]) ->
 	{ok, {{one_for_one, 5, 10}, [
-		% events: ready/maintanence
+		% events: joined/ready/maintanence
 		?CHILD(ar_events, node, worker),
 		% events: connected (got at leats one peer) / disconnected (lost the last peer)
 		?CHILD(ar_events, network, worker),

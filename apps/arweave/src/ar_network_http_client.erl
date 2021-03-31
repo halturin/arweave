@@ -9,6 +9,9 @@
 	get_time/2,
 	get_peers/2,
 	get_info/2,
+	get_block_index/2,
+	get_block/2,
+	get_tx/2,
 	get_wallet_list/2,
 	get_wallet_list_chunk/2
 ]).
@@ -36,8 +39,8 @@ get_time(Peer, _) ->
 			%% The timestamp returned by the HTTP daemon is floored second precision. Thus the
 			%% upper bound is increased by 1.
 			{ok, {Time - RequestTime, Time + RequestTime + 1}};
-		Error ->
-			{error, Error}
+		_ ->
+			error
 	end.
 
 
@@ -45,21 +48,21 @@ get_time(Peer, _) ->
 get_peers(Peer, _) ->
 	case catch
 		ar_http:req(#{
-					method => get,
-					peer => Peer,
-					path => "/peers",
-					headers => p2p_headers()
-				})
+			method => get,
+			peer => Peer,
+			path => "/peers",
+			headers => p2p_headers()
+		})
 	of
 		{ok, {{<<"200">>, _}, _, Body, _, _}} ->
 			PeerArray = ar_serialize:dejsonify(Body),
 			lists:map(fun ar_util:parse_peer/1, PeerArray);
-		{error, Error} ->
-			{error, Error}
+		_ ->
+			not_found
 	end.
 
 get_info(Peer, _) ->
-	case
+	case catch
 		ar_http:req(#{
 			method => get,
 			peer => Peer,
@@ -72,8 +75,59 @@ get_info(Peer, _) ->
 		{ok, {{<<"200">>, _}, _, JSON, _, _}} ->
 			process_get_info_json(JSON);
 		_ ->
-			info_unavailable
+			not_found
 	end.
+
+%% @doc Get a block hash list (by its hash) from the external peer.
+get_block_index(Peer, _) ->
+	?LOG_ERROR("AAAAAAAAAAAAAAAAA0 ~p", [Peer]),
+	case catch
+		 ar_http:req(#{
+			method => get,
+			peer => Peer,
+			path => "/block_index",
+			timeout => 120 * 1000,
+			headers => p2p_headers()
+		})
+	of
+		{ok, {{<<"200">>, _}, _, Body, _, _}} ->
+			ar_serialize:json_struct_to_block_index(ar_serialize:dejsonify(Body));
+		A ->
+			?LOG_ERROR("AAAAAAAAAAAAAAAAA ~p", [A]),
+			not_found
+	end.
+
+get_block(_Peer, _H) ->
+	not_found.
+
+get_tx(Peer, TXID) ->
+	case handle_tx_response(
+		ar_http:req(#{
+			method => get,
+			peer => Peer,
+			path => "/tx/" ++ binary_to_list(ar_util:encode(TXID)),
+			headers => p2p_headers(),
+			connect_timeout => 500,
+			timeout => 60 * 1000,
+			limit => ?MAX_BODY_SIZE
+		})
+	) of
+		#tx{} = TX ->
+			case ar_tx:verify_tx_id(TXID, TX) of
+				false ->
+					?LOG_WARNING([
+						{event, peer_served_invalid_tx},
+						{peer, ar_util:format_peer(Peer)},
+						{tx, ar_util:encode(TXID)}
+					]),
+					not_found;
+				true ->
+					TX
+			end;
+		_ ->
+			not_found
+	end.
+
 
 
 %% @doc Get a bunch of wallets by the given root hash from external peers.
@@ -179,3 +233,26 @@ safe_get_vals(Keys, Props) ->
 		error -> error;
 		Vals  -> {ok, lists:reverse(Vals)}
 	end.
+
+
+%% @doc Process the response of an /block call.
+handle_block_response(Peer, {ok, {{<<"200">>, _}, _, Body, _, _}}, BlockType) ->
+	case catch ar_serialize:json_struct_to_block(Body) of
+		B when is_record(B, block), BlockType == block_shadow ->
+			{shadow, B};
+		B when is_record(B, block), BlockType == full_block ->
+			{full, B};
+		_ ->
+			not_found
+	end;
+handle_block_response(_, _, _) ->
+	not_found.
+
+%% @doc Process the response of a /tx call.
+handle_tx_response({ok, {{<<"200">>, _}, _, Body, _, _}}) ->
+	case catch ar_serialize:json_struct_to_tx(Body) of
+		TX when is_record(TX, tx) -> TX;
+		_ -> not_found
+	end;
+handle_tx_response(_Response) ->
+	not_found.

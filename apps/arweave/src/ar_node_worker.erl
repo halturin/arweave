@@ -61,20 +61,60 @@ start_link() ->
 init([]) ->
 	process_flag(trap_exit, true),
 	ok = ar_events:subscribe(network),
-	case ar_network:is_connected() of
-		true ->
-			% if already joined (connected) we should
-			% emulate this event in order to initialize the process state
-			?MODULE ! {event, network, joined};
-		_ ->
-			ok
-	end,
+	{ok, Config} = application:get_env(arweave, config),
 	%% Initialize RandomX.
 	ar_randomx_state:start(),
 	ar_randomx_state:start_block_polling(),
 	%% Read persisted mempool.
 	load_mempool(),
-	{ok, undefined}.
+	case ar_network:is_connected() of
+		true ->
+			% if already joined (connected) we should
+			% emulate this event in order to initialize the process state
+			?MODULE ! {event, network, connected};
+		_ ->
+			ok
+	end,
+	Gossip = ar_gossip:init([
+		whereis(ar_bridge),
+		%% Attach webhook listeners to the internal gossip network.
+		ar_webhook:start(Config#config.webhooks)
+	]),
+	ar_bridge:add_local_peer(self()),
+	%% Add pending transactions from the persisted mempool to the propagation queue.
+	[{tx_statuses, Map}] = ets:lookup(node_state, tx_statuses),
+	maps:map(
+		fun (_TXID, ready_for_mining) ->
+				ok;
+			(TXID, waiting) ->
+				[{_, TX}] = ets:lookup(node_state, {tx, TXID}),
+				ar_bridge:add_tx(TX)
+		end,
+		Map
+	),
+	%% May be start mining.
+	case Config#config.mine of
+		true ->
+			gen_server:cast(self(), automine);
+		_ ->
+			do_nothing
+	end,
+	gen_server:cast(?MODULE, process_task_queue),
+	ets:insert(node_state, [
+		{is_joined,						false},
+		{hash_list_2_0_for_1_0_blocks,	read_hash_list_2_0_for_1_0_blocks()}
+	]),
+	State = #{
+		miner => undefined,
+		automine => false,
+		tags => [],
+		gossip => Gossip,
+		reward_addr => determine_mining_address(Config),
+		blocks_missing_txs => sets:new(),
+		missing_txs_lookup_processes => #{},
+		task_queue => gb_sets:new()
+	},
+	{ok, State}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -152,99 +192,11 @@ handle_cast(Message, #{ task_queue := TaskQueue } = State) ->
 %%									 {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_info({event, network, connected}, undefined) ->
-	?LOG_INFO("Connected to the network."),
-	%% Join the node.
-	{ok, Config} = application:get_env(arweave, config),
-	BI =
-		case {Config#config.start_from_block_index, Config#config.init} of
-			{false, false} ->
-				not_joined;
-			{true, _} ->
-				case ar_storage:read_block_index() of
-					{error, enoent} ->
-						io:format(
-							"~n~n\tBlock index file is not found. "
-							"If you want to start from a block index copied "
-							"from another node, place it in "
-							"<data_dir>/hash_lists/last_block_index.json~n~n"
-						),
-						erlang:halt();
-					BI2 ->
-						BI2
-				end;
-			{false, true} ->
-				Config2 = Config#config{ init = false },
-				application:set_env(arweave, config, Config2),
-				ar_weave:init(
-					ar_util:genesis_wallets(),
-					ar_retarget:switch_to_linear_diff(Config#config.diff),
-					0,
-					ar_storage:read_tx(ar_weave:read_v1_genesis_txs())
-				)
-		end,
-	case {BI, Config#config.auto_join} of
-		{not_joined, true} ->
-			ar_join:start(self(), Config#config.peers);
-		{[#block{} = GenesisB], true} ->
-			BI = [ar_util:block_index_entry_from_block(GenesisB)],
-			ar_randomx_state:init(BI, []),
-			?MODULE ! {join, BI, [GenesisB]};
-		{BI, true} ->
-			ar_randomx_state:init(BI, []),
-			?MODULE ! {join, BI, read_recent_blocks(BI)};
-		{_, false} ->
-			do_nothing
-	end,
-
-	Gossip = ar_gossip:init([
-		whereis(ar_bridge),
-		%% Attach webhook listeners to the internal gossip network.
-		ar_webhook:start(Config#config.webhooks)
-	]),
-	ar_bridge:add_local_peer(self()),
-	%% Add pending transactions from the persisted mempool to the propagation queue.
-	[{tx_statuses, Map}] = ets:lookup(node_state, tx_statuses),
-	maps:map(
-		fun (_TXID, ready_for_mining) ->
-				ok;
-			(TXID, waiting) ->
-				[{_, TX}] = ets:lookup(node_state, {tx, TXID}),
-				ar_bridge:add_tx(TX)
-		end,
-		Map
-	),
-	%% May be start mining.
-	case Config#config.mine of
-		true ->
-			gen_server:cast(self(), automine);
-		_ ->
-			do_nothing
-	end,
-	gen_server:cast(?MODULE, process_task_queue),
-	ets:insert(node_state, [
-		{is_joined,						false},
-		{hash_list_2_0_for_1_0_blocks,	read_hash_list_2_0_for_1_0_blocks()}
-	]),
-	%% Start the HTTP server.
-	ok = ar_http_iface_server:start(),
-	State = #{
-		miner => undefined,
-		automine => false,
-		tags => [],
-		gossip => Gossip,
-		reward_addr => determine_mining_address(Config),
-		blocks_missing_txs => sets:new(),
-		missing_txs_lookup_processes => #{},
-		task_queue => gb_sets:new()
-	},
-	{noreply, State};
-
 handle_info({event, network, connected}, State) ->
 	?LOG_INFO("Reconnected to the network."),
 	% rejoined to the network. do nothing.
 	{noreply, State};
-handle_info({event, network, left}, State) ->
+handle_info({event, network, disconnected}, State) ->
 	?LOG_ERROR("Disconnected from the network. Trying to reconnect..."),
 	{noreply, State};
 
@@ -252,12 +204,17 @@ handle_info(Info, State) when is_record(Info, gs_msg) ->
 	gen_server:cast(?MODULE, {gossip_message, Info}),
 	{noreply, State};
 
-handle_info({join, BI, Blocks}, State) ->
+handle_info({event, network, {joined, BI, Blocks}}, State) ->
+	?LOG_ERROR("JJJJJJJOINED"),
 	{ok, _} = ar_wallets:start_link([{blocks, Blocks}]),
 	ets:insert(node_state, [
 		{block_index,	BI},
 		{joined_blocks,	Blocks}
 	]),
+	{noreply, State};
+
+handle_info({event, network, _}, State) ->
+	% ignore the rest of network events
 	{noreply, State};
 
 handle_info(wallets_ready, State) ->
@@ -1105,20 +1062,6 @@ read_hash_list_2_0_for_1_0_blocks() ->
 		false ->
 			[]
 	end.
-
-
-read_recent_blocks(not_joined) ->
-	[];
-read_recent_blocks(BI) ->
-	read_recent_blocks2(lists:sublist(BI, 2 * ?MAX_TX_ANCHOR_DEPTH)).
-
-read_recent_blocks2([]) ->
-	[];
-read_recent_blocks2([{BH, _, _} | BI]) ->
-	B = ar_storage:read_block(BH),
-	TXs = ar_storage:read_tx(B#block.txs),
-	SizeTaggedTXs = ar_block:generate_size_tagged_list_from_txs(TXs),
-	[B#block{ size_tagged_txs = SizeTaggedTXs, txs = TXs } | read_recent_blocks2(BI)].
 
 dump_mempool(TXs, MempoolSize) ->
 	case ar_storage:write_term(mempool, {TXs, MempoolSize}) of

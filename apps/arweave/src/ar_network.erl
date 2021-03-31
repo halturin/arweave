@@ -27,7 +27,9 @@
 	is_connected/0,
 
 	% requests to the peer
-	get_current_block/0,
+	get_current_block_index/0,
+	get_block/1,
+	get_block_index/1,
 	get_wallet_list/1,
 	get_wallet_list_chunk/1,
 	get_wallet_list_chunk/2
@@ -47,7 +49,8 @@
 -define(PEER_SLEEP_TIME, 60). % in minutes
 %% we should rotate the peers
 -define(PEERING_LIFESPAN, 5*60). % in minutes
-
+%%
+-define(DEFAULT_REQUEST_TIMEOUT, 10000).
 %% Internal state definition.
 -record(state, {
 	ready = false,	% switching to 'true' on event {node, ready}
@@ -115,14 +118,35 @@ add_peer_candidate(_IP, _Port) -> false.
 is_connected() ->
 	length(peers_joined()) > 0.
 
-get_current_block() ->
-	request({get_current_block, []}, {1, 10}).
+get_current_block_index() ->
+	request({get_block_index, current}, {first, 10}).
+get_block_index(Hash) ->
+	request({get_block_index, Hash}, {first, 10}).
+get_block(B) ->
+	case request({get_block, B}, {first, 10}) of
+		{shadow, Block} ->
+			Block;
+		{full, Block} ->
+			MempoolTXs = ar_node:get_pending_txs([as_map]),
+			case get_txs(MempoolTXs, Block) of
+				{ok, TXs} ->
+					Block#block {
+						txs = TXs
+					};
+				_ ->
+					unavailable
+			end;
+		_ ->
+			unavailable
+	end.
+get_txs(TXs, B) ->
+	request({get_txs, TXs, B}, {first, 10}).
 get_wallet_list(Hash) ->
-	request({get_wallet_list, Hash}, {1, 10}).
+	request({get_wallet_list, Hash}, {first, 10}).
 get_wallet_list_chunk(ID) ->
-	request({get_wallet_list_chunk, ID}, {1, 10}).
+	request({get_wallet_list_chunk, ID}, {first, 10}).
 get_wallet_list_chunk(ID, Cursor) ->
-	request({get_wallet_list_chunk, {ID, Cursor}}, {1, 10}).
+	request({get_wallet_list_chunk, {ID, Cursor}}, {first, 10}).
 %%--------------------------------------------------------------------
 %% @doc
 %% Starts the server
@@ -285,6 +309,8 @@ handle_info({event, node, ready}, State) when is_reference(State#state.peering_t
 handle_info({event, node, ready}, State) ->
 	?LOG_ERROR("0000000000000000 node is ready"),
 	gen_server:cast(?MODULE, peering),
+	%% Now we can serve incoming requests. Start the HTTP server.
+	ok = ar_http_iface_server:start(),
 	{noreply, State#state{ready = true}};
 handle_info({event, node, _}, State) ->
 	timer:cancel(State#state.peering_timer),
@@ -393,35 +419,78 @@ peer_went_offline(Pid, Reason) ->
 	T = os:system_time(second),
 	case ets:match(?MODULE, {'$1',Pid,'$2','$3'}) of
 		[[]] ->
-			?LOG_ERROR("NOT FOUND PID ~p", [Pid]),
+			?LOG_ERROR("internal error: unknown pid (peer_went_offline) ~p", [Pid]),
 			undefined;
 		[[{IP,Port}, undefined, _PeerID]] ->
 			% couldn't establish peering with this candidate
 			ets:insert(?MODULE, {{IP,Port}, undefined, T});
 		[[{IP,Port}, Since, PeerID]] ->
 			LifeSpan = trunc((T - Since)/60),
-			?LOG_INFO("Peer ~p:~p went offline (~p). had peering during ~p minutes", [IP,Port, Reason, LifeSpan]),
+			?LOG_INFO("Peer ~p:~p went offline (~p). Had peering during ~p minutes", [IP,Port, Reason, LifeSpan]),
 			ar_events:send(peer, {left, PeerID}),
 			ets:insert(?MODULE, {{IP,Port}, undefined, T, undefined})
 	end.
 
-request({Request, Args}, {T, Max}) ->
+% You can make a request in a few different ways:
+%	sequential - making request sequentially until the correct answer will be received
+%	{sequential, N} - the same, but limit the number of retries
+%	broadcast  - broadcasting request and get all answers as a result
+%	{broadcast, N} - broadcasting request to gather N valid answers
+%	parallel   - making request in parallel. Args must be a list.
+
+request(Type, {Request, Args}) ->
+	request(Type, {Request, Args}, ?DEFAULT_REQUEST_TIMEOUT).
+
+request(sequential, {Request, Args}, Timeout) ->
+	Peers = peers_joined(),
+	do_request_sequential({Request, Args}, Timeout, Peers);
+request({sequential, Max}, {Request, Args}, Timeout) ->
 	Peers = lists:sublist(peers_joined(), Max),
-	request({Request, Args}, T, Peers).
+	do_request_sequential({Request, Args}, Timeout, Peers);
 
-request({Request, Args}, first, Peers) ->
-	case do_request({Request, Args}, Peers, 1, 5000) of
-		[Reply] ->
-			Reply;
-		_ ->
-			error
-	end;
-request({Request, Args}, all, Peers) ->
-	do_request({Request, Args}, Peers, length(Peers), 5000).
+request(broadcast, {Request, Args}, Timeout) ->
+	Peers = peers_joined(),
+	N = length(Peers),
+	do_request_broadcast({Request, Args}, N, Timeout, Peers);
+request({broadcast, N}, {Request, Args}, Timeout) ->
+	Peers = peers_joined(),
+	do_request_broadcast({Request, Args}, N, Timeout, Peers);
 
-do_request({Request, Args}, Peers, N, Timeout) ->
+request(parallel, {Request, [A|Args]}, Timeout) ->
+	Peers = peers_joined(),
+	do_request_parallel({Request, [A|Args]}, Timeout, Peers).
+
+%
+% do sequential request
+%
+do_request_sequential({Request, Args}, Timeout, Peers) ->
 	Origin = self(),
-	Receiver = spawn(do_spawn_receive(Origin, {Request, Args}, Peers, N, Timeout)),
+	R = spawn(fun() -> do_sequential_spawn(Origin, {Request, Args}, Timeout, Peers) end),
+	receive
+		Result ->
+			Result
+	after Timeout*3 ->
+		exit(R, timeout),
+		timeout
+	end.
+
+do_sequential_spawn(Origin, {_Request, _Args}, _Timeout, []) ->
+	Origin ! error;
+do_sequential_spawn(Origin, {Request, Args}, Timeout, [{_IP, _Port, Pid}|Peers]) ->
+	case catch gen_server:call(Pid, {request, Request, Args}, Timeout) of
+		{result, Result} ->
+			Origin ! Result;
+		E ->
+			?LOG_ERROR("AAAAAAAAAAAAAAAAA2 (~p) ~p", [{Pid, Request, Args}, E]),
+			do_sequential_spawn(Origin, {Request, Args}, Timeout, Peers)
+	end.
+
+%
+% do broadcast request
+%
+do_request_broadcast({Request, Args}, N, Timeout, Peers) ->
+	Origin = self(),
+	Receiver = spawn(fun() -> do_broadcast_spawn(Origin, {Request, Args}, {N,N,[]}, Timeout, Peers) end),
 	receive
 		Result ->
 		exit(Receiver, normal),
@@ -431,38 +500,68 @@ do_request({Request, Args}, Peers, N, Timeout) ->
 		timeout
 	end.
 
-% We could use async way (without spawning a lot of processes)
-% just using erlang:send(Pid, {'$gen_call', {Ref,From}, Reqests})
-% and collecting the replies with accoring Ref. I wouldn't say it
-% more tricky, but spawning is simpler and a process in Erlang VM
-% is a pretty cheap thing.
-do_spawn_receive(Origin, {Request, Args}, Peers, N, Timeout) ->
-	Receiver = self(),
-	lists:map(fun({IP, Port, Pid}) ->
-		spawn_link(fun() ->
-			case catch gen_server:call(Pid, {request, Request, Args}, Timeout) of
-				{'EXIT', {timeout, _}} ->
-					Receiver ! error;
-				{'EXIT', Error} ->
-					?LOG_ERROR("Something went wrong during request to the peer ~p:~p (~p): ~p",
-							   [IP, Port, Pid, Error]);
-			Result ->
-				Receiver ! Result
-			end
-		end)
-	end, Peers),
-	Origin ! do_receive(N, [], Timeout).
-
-do_receive(0, Acc, _Timeout) ->
-	Acc;
-do_receive(N, Acc, Timeout) ->
+do_broadcast_spawn(Origin, {_Request, _Args}, {_,_,Results}, _Timeout, []) ->
+	% no more peers
+	Origin ! {nopeers, Results};
+do_broadcast_spawn(Origin, {_Request, _Args}, {0,0,Results}, _Timeout, _Peers) ->
+	Origin ! Results;
+do_broadcast_spawn(Origin, {Request, Args}, {0,N,Results}, Timeout, Peers) ->
 	receive
-		{result, Result} ->
-			do_receive(N-1, [Result|Acc], Timeout);
-		_ ->
-			do_receive(N-1, [error|Acc], Timeout)
-	after Timeout*2 ->
-			do_receive(N-1, [timeout|Acc], Timeout)
+		error ->
+			do_broadcast_spawn(Origin, {Request, Args}, {1,N,Results}, Timeout, Peers);
+		Result ->
+			do_broadcast_spawn(Origin, {Request, Args}, {0,N-1,[Result|Results]}, Timeout, Peers)
+	after Timeout ->
+		Origin ! {timeout, Results}
+	end;
+do_broadcast_spawn(Origin, {Request, Args}, {S,N,Results}, Timeout, [{_IP, _Port, Pid}|Peers]) ->
+	Receiver = self(),
+	spawn_link(fun() ->
+			case catch gen_server:call(Pid, {request, Request, Args}, Timeout) of
+				{result, Result} ->
+					Receiver ! Result;
+				E ->
+					?LOG_ERROR("AAAAAAAAAAAAAAAAA3 (~p) ~p", [{Pid, Request, Args}, E]),
+					Receiver ! error
+			end
+	end),
+	do_broadcast_spawn(Origin, {Request, Args}, Peers, {S-1,N,Results}, Timeout).
+
+%
+% do parallel request
+%
+do_request_parallel({Request, Args}, Timeout, Peers) ->
+	Origin = self(),
+	Receiver = spawn(fun() -> do_parallel_spawn(Origin, {Request, Args}, {0,[]}, Timeout, Peers) end),
+	receive
+		Result ->
+			Result
+	after Timeout*3 ->
+		exit(Receiver, timeout),
+		timeout
 	end.
 
+do_parallel_spawn(Origin, {_Request, []}, {0, Results}, _Timeout, _Peers) ->
+	Origin ! Results;
+do_parallel_spawn(Origin, {Request, Args}, {N, Results}, Timeout, Peers) when Args == []; Peers == [] ->
+	receive
+		{error, A} ->
+			do_parallel_spawn(Origin, {Request, [A]}, {N,Results}, Timeout, Peers);
+		{result, Result, Peer} ->
+			do_parallel_spawn(Origin, {Request, []}, {N-1, [Result|Results]}, Timeout, [Peer|Peers])
+	after Timeout*2 ->
+		Origin ! {timeout, Results}
+	end;
+do_parallel_spawn(Origin, {Request, [A|Args]}, {N, Results}, Timeout, [{IP, Port, Pid}|Peers]) ->
+	Receiver = self(),
+	spawn_link(fun() ->
+			case catch gen_server:call(Pid, {request, Request, A}, Timeout) of
+				{result, Result} ->
+					Receiver ! {result, Result, {IP, Port, Pid}};
+				E ->
+					?LOG_ERROR("AAAAAAAAAAAAAAAAA4 (~p) ~p", [{Pid, Request, A}, E]),
+					Receiver ! {error, A}
+			end
+	end),
+	do_parallel_spawn(Origin, {Request, Args}, {N+1, Results}, Timeout, Peers).
 
