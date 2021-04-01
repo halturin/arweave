@@ -22,14 +22,16 @@
 
 -export([
 	broadcast/2,
-	broadcast/3,
 	add_peer_candidate/2,
 	is_connected/0,
 
 	% requests to the peer
 	get_current_block_index/0,
 	get_block/1,
+	get_block_shadow/1,
 	get_block_index/1,
+	get_tx/1,
+	get_txs/1,
 	get_wallet_list/1,
 	get_wallet_list_chunk/1,
 	get_wallet_list_chunk/2
@@ -51,6 +53,8 @@
 -define(PEERING_LIFESPAN, 5*60). % in minutes
 %%
 -define(DEFAULT_REQUEST_TIMEOUT, 10000).
+%%
+-define(MAX_PARALLEL_REQUESTS, 15).
 %% Internal state definition.
 -record(state, {
 	ready = false,	% switching to 'true' on event {node, ready}
@@ -70,25 +74,10 @@
 %% @spec broadcast(block, Block) -> {ok, Ref} | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
-broadcast(block, Block) ->
-	gen_server:call(?MODULE, {broadcast, block, Block, self()});
-broadcast(tx, TX) ->
-	gen_server:call(?MODULE, {broadcast, tx, TX, self()}).
-
-%%--------------------------------------------------------------------
-%% @doc
-%% Sends Block to the given peers. Returns a reference in order to
-%% handle {sent, block, Ref} message on a sender side. This message is
-%% sending once all the peering process are reported on this request.
-%% To - list of peers ID where the given Block should be delivered to.
-%% Useful with ar_rating:get_top_joined(N)
-%% @spec broadcast(block, Block, To) -> {ok, Ref} | {error, Error}
-%% @end
-%%--------------------------------------------------------------------
-broadcast(block, Block, To) when is_list(To) ->
-	gen_server:call(?MODULE, {broadcast, block, Block, self(), To});
-broadcast(tx, TX, To) when is_list(To) ->
-	gen_server:call(?MODULE, {broadcast, tx, TX, self(), To}).
+broadcast(block, _Block) ->
+	ok;
+broadcast(tx, _TX) ->
+	ok.
 
 %% @doc
 %% add_peer_candidate adds a record with given IP address and Port number for the
@@ -118,29 +107,64 @@ add_peer_candidate(_IP, _Port) -> false.
 is_connected() ->
 	length(peers_joined()) > 0.
 
+%%
+%% Methods below are requesting information via the network
+%%
 get_current_block_index() ->
-	request({get_block_index, current}, {first, 10}).
+	request(sequential, {get_block_index, current}, 60000).
 get_block_index(Hash) ->
-	request({get_block_index, Hash}, {first, 10}).
-get_block(B) ->
-	case request({get_block, B}, {first, 10}) of
-		{shadow, Block} ->
+	request(sequential, {get_block_index, Hash}).
+get_block_shadow(B) ->
+	case request(sequential, {get_block, B}) of
+		Block when ?IS_BLOCK(Block), length(Block#block.txs) > ?BLOCK_TX_COUNT_LIMIT ->
+			?LOG_ERROR("txs count (~p) exceeds the limit (~p)",
+					   [length(Block#block.txs), ?BLOCK_TX_COUNT_LIMIT]),
+			unavailable;
+		Block when ?IS_BLOCK(Block) ->
 			Block;
-		{full, Block} ->
-			MempoolTXs = ar_node:get_pending_txs([as_map]),
-			case get_txs(MempoolTXs, Block) of
-				{ok, TXs} ->
-					Block#block {
-						txs = TXs
-					};
-				_ ->
-					unavailable
-			end;
 		_ ->
 			unavailable
 	end.
-get_txs(TXs, B) ->
-	request({get_txs, TXs, B}, {first, 10}).
+get_block(B) ->
+	case get_block_shadow(B) of
+		unavailable ->
+			unavailable;
+		Block ->
+			case get_txs(Block#block.txs) of
+				unavailable ->
+					unavailable;
+				TXs ->
+					Block#block {
+						txs = TXs
+					}
+			end
+	end.
+get_tx(TX) ->
+	get_txs([TX]).
+get_txs(TXs) ->
+	case request(parallel, {get_txs, TXs}, 30000) of
+	timeout ->
+		unavailable;
+	error ->
+		unavailable;
+	{nopeers, _Result } ->
+		unavailable;
+	{timeout, _Result} ->
+		unavailable;
+	Result ->
+		% transform the map into the list
+		% keeping the same order we had in TXs
+		lists:foldl(fun(ID, Acc) ->
+			case maps:get(ID, Result, unknown) of
+				_ when Acc == error ->
+					unavailable;
+				unknown ->
+					unavailavle;
+				Tx ->
+					[Tx|Acc]
+			end
+		end, [], TXs)
+	end.
 get_wallet_list(Hash) ->
 	request({get_wallet_list, Hash}, {first, 10}).
 get_wallet_list_chunk(ID) ->
@@ -335,6 +359,10 @@ handle_info({event, peer, {joined, PeerID, IP, Port}}, State) ->
 			ets:insert(?MODULE, {{IP,Port}, Pid, T, PeerID}),
 			{noreply, State}
 	end;
+handle_info({event, peer, _}, State) ->
+	% ignore any other peer event
+	{noreply, State};
+
 handle_info({'DOWN', _Ref, process, Pid, Reason}, State) ->
 	% peering process is down
 	peer_went_offline(Pid, Reason),
@@ -421,9 +449,9 @@ peer_went_offline(Pid, Reason) ->
 		[[]] ->
 			?LOG_ERROR("internal error: unknown pid (peer_went_offline) ~p", [Pid]),
 			undefined;
-		[[{IP,Port}, undefined, _PeerID]] ->
+		[[{IP,Port}, undefined, PeerID]] ->
 			% couldn't establish peering with this candidate
-			ets:insert(?MODULE, {{IP,Port}, undefined, T});
+			ets:insert(?MODULE, {{IP,Port}, undefined, T, PeerID});
 		[[{IP,Port}, Since, PeerID]] ->
 			LifeSpan = trunc((T - Since)/60),
 			?LOG_INFO("Peer ~p:~p went offline (~p). Had peering during ~p minutes", [IP,Port, Reason, LifeSpan]),
@@ -437,6 +465,14 @@ peer_went_offline(Pid, Reason) ->
 %	broadcast  - broadcasting request and get all answers as a result
 %	{broadcast, N} - broadcasting request to gather N valid answers
 %	parallel   - making request in parallel. Args must be a list.
+%
+%	returns:
+%	   error
+%	   {timeout, Result}       - partial data received (for broadcast, parallel requests only)
+%	   {nopeers, Result}       - partial data recevied, Args - no result for them.
+%	   Result - a list of values for broadcast request
+%	            a map of #{Arg => Value} for parallel request
+%	            a term - for the sequential one
 
 request(Type, {Request, Args}) ->
 	request(Type, {Request, Args}, ?DEFAULT_REQUEST_TIMEOUT).
@@ -471,12 +507,14 @@ do_request_sequential({Request, Args}, Timeout, Peers) ->
 			Result
 	after Timeout*3 ->
 		exit(R, timeout),
-		timeout
+		error
 	end.
 
-do_sequential_spawn(Origin, {_Request, _Args}, _Timeout, []) ->
-	Origin ! error;
-do_sequential_spawn(Origin, {Request, Args}, Timeout, [{_IP, _Port, Pid}|Peers]) ->
+do_sequential_spawn(Origin, {Request, Args}, _Timeout, []) ->
+	?LOG_ERROR("22222222222 ~p error", [{Request, Args}]),
+	Origin ! {nopeers, Args};
+do_sequential_spawn(Origin, {Request, Args}, Timeout, [{IP, Port, Pid}|Peers]) ->
+	?LOG_ERROR("22222222222 ~p: ~p", [{IP,Port,Pid}, {Request, Args}]),
 	case catch gen_server:call(Pid, {request, Request, Args}, Timeout) of
 		{result, Result} ->
 			Origin ! Result;
@@ -497,12 +535,12 @@ do_request_broadcast({Request, Args}, N, Timeout, Peers) ->
 			Result
 	after Timeout*3 ->
 		exit(Receiver, timeout),
-		timeout
+		error
 	end.
 
-do_broadcast_spawn(Origin, {_Request, _Args}, {_,_,Results}, _Timeout, []) ->
+do_broadcast_spawn(Origin, {_Request, Args}, {_,_,Results}, _Timeout, []) ->
 	% no more peers
-	Origin ! {nopeers, Results};
+	Origin ! {nopeers, Results, Args};
 do_broadcast_spawn(Origin, {_Request, _Args}, {0,0,Results}, _Timeout, _Peers) ->
 	Origin ! Results;
 do_broadcast_spawn(Origin, {Request, Args}, {0,N,Results}, Timeout, Peers) ->
@@ -532,23 +570,38 @@ do_broadcast_spawn(Origin, {Request, Args}, {S,N,Results}, Timeout, [{_IP, _Port
 %
 do_request_parallel({Request, Args}, Timeout, Peers) ->
 	Origin = self(),
-	Receiver = spawn(fun() -> do_parallel_spawn(Origin, {Request, Args}, {0,[]}, Timeout, Peers) end),
+	Receiver = spawn(fun() -> do_parallel_spawn(Origin, {Request, Args}, {0,#{}}, Timeout, Peers) end),
 	receive
 		Result ->
 			Result
 	after Timeout*3 ->
 		exit(Receiver, timeout),
-		timeout
+		error
 	end.
 
 do_parallel_spawn(Origin, {_Request, []}, {0, Results}, _Timeout, _Peers) ->
 	Origin ! Results;
-do_parallel_spawn(Origin, {Request, Args}, {N, Results}, Timeout, Peers) when Args == []; Peers == [] ->
+do_parallel_spawn(Origin, {_Request, Args}, {0, Results}, _Timeout, []) ->
+	Origin ! {nopeers, Results, Args};
+do_parallel_spawn(Origin, {Request, Args}, {N, Results}, Timeout, Peers)
+  								when N > ?MAX_PARALLEL_REQUESTS; Args == []; Peers == [] ->
 	receive
 		{error, A} ->
-			do_parallel_spawn(Origin, {Request, [A]}, {N,Results}, Timeout, Peers);
-		{result, Result, Peer} ->
-			do_parallel_spawn(Origin, {Request, []}, {N-1, [Result|Results]}, Timeout, [Peer|Peers])
+			% exclude this peer since something wrong with him
+			do_parallel_spawn(Origin, {Request, [A|Args]}, {N-1,Results}, Timeout, Peers);
+		{not_found, A, _Peer} when Args == [] ->
+			% if the last Arg left. exclude the peer it wasn't found and go further
+			do_parallel_spawn(Origin, {Request, [A]}, {N-1,Results}, Timeout, Peers);
+		{not_found, _A, Peer} when Peers == [] ->
+			% if the last Peer left. let him to handle the rest of the Args
+			do_parallel_spawn(Origin, {Request, Args}, {N-1,Results}, Timeout, [Peer]);
+		{not_found, A, Peer} ->
+			% Ok, lets get the Arg back to the list for the next attempt.
+			% Get back the peer at the end of peers
+			do_parallel_spawn(Origin, {Request, [A|Args]}, {N-1,Results}, Timeout, Peers++[Peer]);
+		{result, A, Result, Peer} ->
+			Results1 = maps:put(A, Result, Results),
+			do_parallel_spawn(Origin, {Request, Args}, {N-1, Results1}, Timeout, [Peer|Peers])
 	after Timeout*2 ->
 		Origin ! {timeout, Results}
 	end;
@@ -557,7 +610,9 @@ do_parallel_spawn(Origin, {Request, [A|Args]}, {N, Results}, Timeout, [{IP, Port
 	spawn_link(fun() ->
 			case catch gen_server:call(Pid, {request, Request, A}, Timeout) of
 				{result, Result} ->
-					Receiver ! {result, Result, {IP, Port, Pid}};
+					Receiver ! {result, A, Result, {IP, Port, Pid}};
+				not_found ->
+					Receiver ! {not_found, A, {IP, Port, Pid}};
 				E ->
 					?LOG_ERROR("AAAAAAAAAAAAAAAAA4 (~p) ~p", [{Pid, Request, A}, E]),
 					Receiver ! {error, A}

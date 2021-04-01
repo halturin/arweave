@@ -117,6 +117,8 @@ handle_call({request, Request, Args}, _From, State) when is_atom(Request) ->
 			},
 			ar_events:send(peer, {response, request_timeout, Event}),
 			{reply, timeout, State};
+		not_found ->
+			{reply, not_found, State};
 		Error ->
 			% seems like malformed response. we couldn't serialize from JSON
 			Event = #event_peer{
@@ -147,7 +149,7 @@ handle_cast(_Msg, State) when State#state.fails > 3 ->
 
 handle_cast(validate_network, State) ->
 	case (State#state.module):get_info(State#state.peer_ipport, {}) of
-		Info when is_list(Info) ->
+		{ok, Info} when is_list(Info) ->
 			validate_network(Info,State);
 		_ ->
 			timer:send_after(5000, {'$gen_cast', validate_network}),
@@ -207,11 +209,14 @@ handle_cast(validate_time, State) ->
 handle_cast(get_peers, State) ->
 	timer:send_after(60000, {'$gen_cast', get_peers}),
 	Now = os:system_time(second),
-	case ar_network_http_client:get_peers(State#state.peer_ipport, {}) of
-		_Peers when State#state.lifespan < Now ->
+	case (State#state.module):get_peers(State#state.peer_ipport, {}) of
+		{ok, Peers} when State#state.lifespan < Now ->
+			lists:map(fun({A,B,C,D,Port}) ->
+				ar_network:add_peer_candidate({A,B,C,D}, Port)
+			end, Peers),
 			?LOG_ERROR("0000000000000000 ~p time to die", [State#state.peer_ipport]),
 			{stop, normal, State};
-		Peers when is_list(Peers) ->
+		{ok, Peers} when is_list(Peers) ->
 			lists:map(fun({A,B,C,D,Port}) ->
 				ar_network:add_peer_candidate({A,B,C,D}, Port)
 			end, Peers),
@@ -234,6 +239,9 @@ handle_cast(Msg, State) ->
 %%									 {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_info({gun_down,_,http,closed,_,_}, State) ->
+	% ignore http client artifact
+	{noreply, State};
 handle_info(Info, State) ->
 	?LOG_ERROR([{event, unhandled_info}, {module, ?MODULE}, {info, Info}]),
 	{noreply, State}.

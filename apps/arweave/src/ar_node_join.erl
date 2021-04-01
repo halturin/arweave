@@ -151,8 +151,8 @@ handle_cast(joining, State) when State#state.connected == false ->
 handle_cast(joining, State) when State#state.connected ->
 	?LOG_ERROR("111111111111111 joining ..."),
 	case ar_network:get_current_block_index() of
-		[] ->
-			?LOG_ERROR("111111111111111 joining ... []"),
+		error ->
+			?LOG_ERROR("111111111111111 joining (next attempt) ... "),
 			timer:send_after(?REJOIN_TIMEOUT, {'$gen_cast', joining}),
 			{noreply, State};
 		BI ->
@@ -176,7 +176,7 @@ handle_cast(joining, State) when State#state.connected ->
 					%% fork recovery (which is the deepest fork recovery possible) immediately after
 					%% joining the network.
 					Behind = 2 * ?MAX_TX_ANCHOR_DEPTH,
-					gen_server:cast({trail_blocks, Behind, B, BI}, State),
+					gen_server:cast(?MODULE, {trail_blocks, Behind, B, BI}),
 					{noreply, State#state{blocks = []}}
 			end
 	end;

@@ -1,9 +1,13 @@
 -module(ar_network_http_client).
 
-% This module implements HTTP transport for the arweave network
+% This module implements HTTP transport (client side) for the arweave network
 % Every callback should have arity 2: Peer, Options
-% Peer: {A,B,C,D,Port}
-% Options: term
+%   Peer: {A,B,C,D,Port}
+%   Options: term
+% and return
+%   {ok, Value} - on success
+%   not_found   - if requested information is not present on the peer
+%   _           - any other result will be treated as an error
 %
 -export([
 	get_time/2,
@@ -56,9 +60,11 @@ get_peers(Peer, _) ->
 	of
 		{ok, {{<<"200">>, _}, _, Body, _, _}} ->
 			PeerArray = ar_serialize:dejsonify(Body),
-			lists:map(fun ar_util:parse_peer/1, PeerArray);
+			{ok, lists:map(fun ar_util:parse_peer/1, PeerArray)};
+		{ok, {{<<"404">>, _}, _, _, _, _}} ->
+			not_found;
 		_ ->
-			not_found
+			error
 	end.
 
 get_info(Peer, _) ->
@@ -73,9 +79,12 @@ get_info(Peer, _) ->
 		})
 	of
 		{ok, {{<<"200">>, _}, _, JSON, _, _}} ->
-			process_get_info_json(JSON);
-		_ ->
-			not_found
+			{ok, process_get_info_json(JSON)};
+		{ok, {{<<"404">>, _}, _, _, _, _}} ->
+			not_found;
+		A ->
+			?LOG_ERROR("AAAAAAAAAAAAAAAAA ~p", [A]),
+			error
 	end.
 
 %% @doc Get a block hash list (by its hash) from the external peer.
@@ -91,10 +100,12 @@ get_block_index(Peer, _) ->
 		})
 	of
 		{ok, {{<<"200">>, _}, _, Body, _, _}} ->
-			ar_serialize:json_struct_to_block_index(ar_serialize:dejsonify(Body));
+			{ok, ar_serialize:json_struct_to_block_index(ar_serialize:dejsonify(Body))};
+		{ok, {{<<"404">>, _}, _, _, _, _}} ->
+			not_found;
 		A ->
 			?LOG_ERROR("AAAAAAAAAAAAAAAAA ~p", [A]),
-			not_found
+			error
 	end.
 
 get_block(_Peer, _H) ->
@@ -122,7 +133,7 @@ get_tx(Peer, TXID) ->
 					]),
 					not_found;
 				true ->
-					TX
+					{ok, TX}
 			end;
 		_ ->
 			not_found
