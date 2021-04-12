@@ -96,7 +96,7 @@ handle_call(Request, _From, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_cast(join, State) ->
-	?LOG_ERROR("111111111111111 join..."),
+	?LOG_ERROR("DBG join..."),
 	{ok, Config} = application:get_env(arweave, config),
 	BI =
 		case {Config#config.start_from_block_index, Config#config.init} of
@@ -144,25 +144,28 @@ handle_cast(join, State) ->
 	end;
 
 handle_cast(joining, State) when State#state.connected == false ->
-	?LOG_ERROR("111111111111111 joining (not connected) ..."),
+	?LOG_ERROR("DBG joining (not connected) ..."),
 	%% do nothing. waiting for the {event, network, connected}
 	{noreply, State};
 
 handle_cast(joining, State) when State#state.connected ->
-	?LOG_ERROR("111111111111111 joining ..."),
+	?LOG_ERROR("DBG joining ..."),
 	case ar_network:get_current_block_index() of
 		error ->
-			?LOG_ERROR("111111111111111 joining (next attempt) ... "),
+			?LOG_ERROR("DBG joining (next attempt) ... "),
 			timer:send_after(?REJOIN_TIMEOUT, {'$gen_cast', joining}),
 			{noreply, State};
 		BI ->
 			{Hash, _, _} = hd(BI),
 			ar:console("Fetching current block... ~p~n", [{hash, ar_util:encode(Hash)}]),
 			case ar_network:get_block(Hash) of
-				{error, _} ->
+				error ->
 					ar:console(
 						"Did not manage to fetch current block from any of the peers. Will retry later.~n"
 					),
+					timer:send_after(?REJOIN_TIMEOUT, {'$gen_cast', joining}),
+					{noreply, State};
+				unavailable ->
 					timer:send_after(?REJOIN_TIMEOUT, {'$gen_cast', joining}),
 					{noreply, State};
 				B ->
@@ -177,29 +180,35 @@ handle_cast(joining, State) when State#state.connected ->
 					%% joining the network.
 					Behind = 2 * ?MAX_TX_ANCHOR_DEPTH,
 					gen_server:cast(?MODULE, {trail_blocks, Behind, B, BI}),
-					{noreply, State#state{blocks = []}}
+					% set joining to false in order to prevent yet another self casting 'joining'
+					% if we lost connection during the trailing blocks. it will
+					% continue to trail once connection come back automatically
+					{noreply, State#state{blocks = [], joining = false}}
 			end
 	end;
 
 handle_cast({trail_blocks, Behind, B, BI}, State) when State#state.connected == false ->
-	?LOG_ERROR("111111111111111 trailing (not connected) ... []"),
+	?LOG_ERROR("DBG trailing (not connected) ... []"),
 	Message = {trail_blocks, Behind, B, BI},
-	erlang:send_after(?REJOIN_TIMEOUT, {'$gen_cast', Message}),
+	timer:send_after(?REJOIN_TIMEOUT, {'$gen_cast', Message}),
 	{noreply, State};
 
 handle_cast({trail_blocks, Behind, B, BI}, State) when Behind == 0; B#block.height == 0 ->
-	?LOG_ERROR("111111111111111 trailing ... done "),
+	?LOG_ERROR("DBG trailing ... done "),
 	ar_arql_db:populate_db(?BI_TO_BHL(BI)),
-	ar_node_state:init(BI),
+	%ar_node_state:init(BI),
+	ar_randomx_state:init(BI),
 	ar_events:send(node, {joined, BI, State#state.blocks}),
 	ar:console("Joined the Arweave network successfully.~n");
 
-handle_cast({trail_blocks, Behind, B, BI}, State) ->
-	?LOG_ERROR("111111111111111 trailing ... ~p", [Behind]),
+handle_cast({trail_blocks, Behind, B, BI}, State) when ?IS_BLOCK(B) ->
+	?LOG_ERROR("DBG trailing ... ~p", [Behind]),
 	PreviousB = ar_network:get_block(B#block.previous_block),
 	case ?IS_BLOCK(PreviousB) of
 		true ->
+			?LOG_ERROR("DBG got block ~p. Generating size tagged list for ~p  of block ~p", [PreviousB#block.height,length(B#block.txs), B#block.height]),
 			SizeTaggedTXs = ar_block:generate_size_tagged_list_from_txs(B#block.txs),
+			?LOG_ERROR("DBG generated size tagget list for ~p txs of ~p ", [length(B#block.txs),B#block.previous_block]),
 			Blocks = [B#block{ size_tagged_txs = SizeTaggedTXs } | State#state.blocks],
 			gen_server:cast(?MODULE, {trail_blocks, Behind-1, PreviousB, BI}),
 			{noreply, State#state{blocks = Blocks}};
@@ -208,7 +217,7 @@ handle_cast({trail_blocks, Behind, B, BI}, State) ->
 				[{event, could_not_retrieve_joining_block}]
 			),
 			Message = {trail_blocks, Behind, B, BI},
-			erlang:send_after(?REJOIN_TIMEOUT, {'$gen_cast', Message}),
+			timer:send_after(?REJOIN_TIMEOUT, {'$gen_cast', Message}),
 			{noreply, State}
 	end;
 

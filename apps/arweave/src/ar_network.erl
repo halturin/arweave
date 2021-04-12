@@ -130,8 +130,12 @@ get_block(B) ->
 		unavailable ->
 			unavailable;
 		Block ->
+			?LOG_ERROR("DBG got shadow block ~p. Get txs ~p", [Block#block.height, length(Block#block.txs)]),
 			case get_txs(Block#block.txs) of
 				unavailable ->
+					unavailable;
+				{partial, _, _} ->
+					% do not handle partial result
 					unavailable;
 				TXs ->
 					Block#block {
@@ -142,13 +146,13 @@ get_block(B) ->
 get_tx(TX) ->
 	get_txs([TX]).
 get_txs(TXs) ->
-	case request(parallel, {get_txs, TXs}, 30000) of
+	case request(parallel, {get_tx, TXs}, 30000) of
 	timeout ->
 		unavailable;
 	error ->
 		unavailable;
-	{nopeers, _Result } ->
-		unavailable;
+	{nopeers, Result, LeftTXs } ->
+		{partial, Result, LeftTXs};
 	{timeout, _Result} ->
 		unavailable;
 	Result ->
@@ -159,18 +163,18 @@ get_txs(TXs) ->
 				_ when Acc == error ->
 					unavailable;
 				unknown ->
-					unavailavle;
+					unavailable;
 				Tx ->
 					[Tx|Acc]
 			end
 		end, [], TXs)
 	end.
 get_wallet_list(Hash) ->
-	request({get_wallet_list, Hash}, {first, 10}).
+	request(sequential, {get_wallet_list, Hash}, 10000).
 get_wallet_list_chunk(ID) ->
-	request({get_wallet_list_chunk, ID}, {first, 10}).
+	request(sequential, {get_wallet_list_chunk, ID}, 10000).
 get_wallet_list_chunk(ID, Cursor) ->
-	request({get_wallet_list_chunk, {ID, Cursor}}, {first, 10}).
+	request(sequential, {get_wallet_list_chunk, {ID, Cursor}}, 10000).
 %%--------------------------------------------------------------------
 %% @doc
 %% Starts the server
@@ -408,7 +412,7 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 peering(IP, Port, Options)->
-	?LOG_ERROR("0000000000000000 ~p connecting...", [{IP,Port}]),
+	?LOG_ERROR("DBG peering ~p connecting...", [{IP,Port}]),
 	T = os:system_time(second),
 	SleepTime = proplists:get_value(sleep_time, Options, ?PEER_SLEEP_TIME),
 	case ets:lookup(?MODULE, {IP,Port}) of
@@ -492,9 +496,11 @@ request({broadcast, N}, {Request, Args}, Timeout) ->
 	Peers = peers_joined(),
 	do_request_broadcast({Request, Args}, N, Timeout, Peers);
 
-request(parallel, {Request, [A|Args]}, Timeout) ->
+request(parallel, {_Request, []}, _Timeout) ->
+	[];
+request(parallel, {Request, Args}, Timeout) ->
 	Peers = peers_joined(),
-	do_request_parallel({Request, [A|Args]}, Timeout, Peers).
+	do_request_parallel({Request, Args}, Timeout, Peers).
 
 %
 % do sequential request
@@ -503,23 +509,26 @@ do_request_sequential({Request, Args}, Timeout, Peers) ->
 	Origin = self(),
 	R = spawn(fun() -> do_sequential_spawn(Origin, {Request, Args}, Timeout, Peers) end),
 	receive
-		Result ->
+		{final, Result} ->
 			Result
 	after Timeout*3 ->
 		exit(R, timeout),
 		error
 	end.
 
-do_sequential_spawn(Origin, {Request, Args}, _Timeout, []) ->
-	?LOG_ERROR("22222222222 ~p error", [{Request, Args}]),
-	Origin ! {nopeers, Args};
+do_sequential_spawn(Origin, {_Request, Args}, _Timeout, []) ->
+	Origin ! {final, {nopeers, Args}};
 do_sequential_spawn(Origin, {Request, Args}, Timeout, [{IP, Port, Pid}|Peers]) ->
-	?LOG_ERROR("22222222222 ~p: ~p", [{IP,Port,Pid}, {Request, Args}]),
+	?LOG_ERROR("DBG do_sequential_spawn ~p: ~p", [{IP,Port,Pid}, {Request, Args}]),
 	case catch gen_server:call(Pid, {request, Request, Args}, Timeout) of
 		{result, Result} ->
-			Origin ! Result;
+			Origin ! {final, Result};
+		not_found ->
+			?LOG_ERROR("DBG do_sequential_spawn not_found (~p)", [{Pid, Request, Args}]),
+			do_sequential_spawn(Origin, {Request, Args}, Timeout, Peers);
 		E ->
-			?LOG_ERROR("AAAAAAAAAAAAAAAAA2 (~p) ~p", [{Pid, Request, Args}, E]),
+			% should we penalty this peer?
+			?LOG_ERROR("do_sequential_spawn (~p) ~p", [{Pid, Request, Args}, E]),
 			do_sequential_spawn(Origin, {Request, Args}, Timeout, Peers)
 	end.
 
@@ -530,8 +539,8 @@ do_request_broadcast({Request, Args}, N, Timeout, Peers) ->
 	Origin = self(),
 	Receiver = spawn(fun() -> do_broadcast_spawn(Origin, {Request, Args}, {N,N,[]}, Timeout, Peers) end),
 	receive
-		Result ->
-		exit(Receiver, normal),
+		{final, Result} ->
+			exit(Receiver, normal),
 			Result
 	after Timeout*3 ->
 		exit(Receiver, timeout),
@@ -540,9 +549,9 @@ do_request_broadcast({Request, Args}, N, Timeout, Peers) ->
 
 do_broadcast_spawn(Origin, {_Request, Args}, {_,_,Results}, _Timeout, []) ->
 	% no more peers
-	Origin ! {nopeers, Results, Args};
+	Origin ! {final, {nopeers, Results, Args}};
 do_broadcast_spawn(Origin, {_Request, _Args}, {0,0,Results}, _Timeout, _Peers) ->
-	Origin ! Results;
+	Origin ! {final, Results};
 do_broadcast_spawn(Origin, {Request, Args}, {0,N,Results}, Timeout, Peers) ->
 	receive
 		error ->
@@ -550,7 +559,7 @@ do_broadcast_spawn(Origin, {Request, Args}, {0,N,Results}, Timeout, Peers) ->
 		Result ->
 			do_broadcast_spawn(Origin, {Request, Args}, {0,N-1,[Result|Results]}, Timeout, Peers)
 	after Timeout ->
-		Origin ! {timeout, Results}
+		Origin ! {final, {timeout, Results}}
 	end;
 do_broadcast_spawn(Origin, {Request, Args}, {S,N,Results}, Timeout, [{_IP, _Port, Pid}|Peers]) ->
 	Receiver = self(),
@@ -559,7 +568,7 @@ do_broadcast_spawn(Origin, {Request, Args}, {S,N,Results}, Timeout, [{_IP, _Port
 				{result, Result} ->
 					Receiver ! Result;
 				E ->
-					?LOG_ERROR("AAAAAAAAAAAAAAAAA3 (~p) ~p", [{Pid, Request, Args}, E]),
+					?LOG_ERROR("DBG do_broadcast_spawn (~p) ~p", [{Pid, Request, Args}, E]),
 					Receiver ! error
 			end
 	end),
@@ -572,7 +581,7 @@ do_request_parallel({Request, Args}, Timeout, Peers) ->
 	Origin = self(),
 	Receiver = spawn(fun() -> do_parallel_spawn(Origin, {Request, Args}, {0,#{}}, Timeout, Peers) end),
 	receive
-		Result ->
+		{final, Result} ->
 			Result
 	after Timeout*3 ->
 		exit(Receiver, timeout),
@@ -580,21 +589,15 @@ do_request_parallel({Request, Args}, Timeout, Peers) ->
 	end.
 
 do_parallel_spawn(Origin, {_Request, []}, {0, Results}, _Timeout, _Peers) ->
-	Origin ! Results;
+	Origin ! {final, Results};
 do_parallel_spawn(Origin, {_Request, Args}, {0, Results}, _Timeout, []) ->
-	Origin ! {nopeers, Results, Args};
+	Origin ! {final, {nopeers, Results, Args}};
 do_parallel_spawn(Origin, {Request, Args}, {N, Results}, Timeout, Peers)
   								when N > ?MAX_PARALLEL_REQUESTS; Args == []; Peers == [] ->
 	receive
 		{error, A} ->
 			% exclude this peer since something wrong with him
 			do_parallel_spawn(Origin, {Request, [A|Args]}, {N-1,Results}, Timeout, Peers);
-		{not_found, A, _Peer} when Args == [] ->
-			% if the last Arg left. exclude the peer it wasn't found and go further
-			do_parallel_spawn(Origin, {Request, [A]}, {N-1,Results}, Timeout, Peers);
-		{not_found, _A, Peer} when Peers == [] ->
-			% if the last Peer left. let him to handle the rest of the Args
-			do_parallel_spawn(Origin, {Request, Args}, {N-1,Results}, Timeout, [Peer]);
 		{not_found, A, Peer} ->
 			% Ok, lets get the Arg back to the list for the next attempt.
 			% Get back the peer at the end of peers
@@ -603,18 +606,19 @@ do_parallel_spawn(Origin, {Request, Args}, {N, Results}, Timeout, Peers)
 			Results1 = maps:put(A, Result, Results),
 			do_parallel_spawn(Origin, {Request, Args}, {N-1, Results1}, Timeout, [Peer|Peers])
 	after Timeout*2 ->
-		Origin ! {timeout, Results}
+		Origin ! {final, {timeout, Results}}
 	end;
 do_parallel_spawn(Origin, {Request, [A|Args]}, {N, Results}, Timeout, [{IP, Port, Pid}|Peers]) ->
 	Receiver = self(),
 	spawn_link(fun() ->
 			case catch gen_server:call(Pid, {request, Request, A}, Timeout) of
 				{result, Result} ->
+					?LOG_ERROR("DBG do_parallel_spawn OK ~p", [{Pid, Request, A}]),
 					Receiver ! {result, A, Result, {IP, Port, Pid}};
 				not_found ->
 					Receiver ! {not_found, A, {IP, Port, Pid}};
 				E ->
-					?LOG_ERROR("AAAAAAAAAAAAAAAAA4 (~p) ~p", [{Pid, Request, A}, E]),
+					?LOG_ERROR("DBG do_parallel_spawn (~p) ~p", [{Pid, Request, A}, E]),
 					Receiver ! {error, A}
 			end
 	end),

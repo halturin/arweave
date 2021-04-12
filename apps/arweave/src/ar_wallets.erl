@@ -92,11 +92,6 @@ set_current(PrevRootHash, RootHash, RewardAddr, Height, PruneDepth) when is_bina
 %%% Generic server callbacks.
 %%%===================================================================
 
-init([{blocks, []}]) ->
-	process_flag(trap_exit, true),
-	DAG = ar_diff_dag:new(<<>>, ar_patricia_tree:new(), not_set),
-	ar_node_worker ! wallets_ready,
-	{ok, DAG};
 init([{blocks, Blocks}]) ->
 	process_flag(trap_exit, true),
 	gen_server:cast(?MODULE, {init, Blocks}),
@@ -231,6 +226,7 @@ handle_cast({write_wallet_list_chunk, RootHash, Cursor, Position}, DAG) ->
 	{noreply, DAG};
 
 handle_cast({init, Blocks}, _) ->
+	?LOG_ERROR("DBG wallets init. Blocks: ~p", [[ar_util:encode(Bl#block.indep_hash) || Bl <- Blocks]]),
 	InitialDepth = ?STORE_BLOCKS_BEHIND_CURRENT,
 	{DAG3, LastB, PrevWalletList} = lists:foldl(
 		fun (B, start) ->
@@ -278,7 +274,7 @@ get_tree(B) ->
 		_ ->
 			case B#block.height >= ar_fork:height_2_2() of
 				true ->
-					{ok, {Cursor, Chunk}} = ar_network:get_wallet_list_chunk(ID),
+					{Cursor, Chunk} = ar_network:get_wallet_list_chunk(ID),
 					{ok, Tree} = load_wallet_tree_from_peers(
 						ID,
 						ar_patricia_tree:from_proplist(Chunk),
@@ -294,7 +290,7 @@ get_tree(B) ->
 load_wallet_tree_from_peers(_ID, Acc, last) ->
 	{ok, Acc};
 load_wallet_tree_from_peers(ID, Acc, Cursor) ->
-	{ok, {NextCursor, Chunk}} = ar_network:get_wallet_list_chunk(ID, Cursor),
+	{NextCursor, Chunk} = ar_network:get_wallet_list_chunk(ID, Cursor),
 	Acc3 = lists:foldl(fun({K, V}, Acc2) -> ar_patricia_tree:insert(K, V, Acc2) end, Acc, Chunk),
 	load_wallet_tree_from_peers(ID, Acc3, NextCursor).
 

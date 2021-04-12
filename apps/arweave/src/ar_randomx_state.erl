@@ -6,7 +6,7 @@
 	randomx_state_by_height/1,
 	debug_server/0
 ]).
--export([init/2, init/4, swap_height/1]).
+-export([init/1, init/4, swap_height/1]).
 
 -include_lib("arweave/include/ar.hrl").
 
@@ -58,14 +58,14 @@ debug_server() ->
 		{state, State} -> State
 	end.
 
-init(BI, Peers) ->
+init(BI) ->
 	CurrentHeight = length(BI) - 1,
 	SwapHeights = lists:usort([
 		swap_height(CurrentHeight + ?STORE_BLOCKS_BEHIND_CURRENT),
 		swap_height(max(0, CurrentHeight - ?STORE_BLOCKS_BEHIND_CURRENT))
 	]),
 	Init = fun(SwapHeight) ->
-		{ok, Key} = randomx_key(SwapHeight, BI, Peers),
+		{ok, Key} = randomx_key(SwapHeight, BI),
 		init(whereis(?MODULE), SwapHeight, Key, erlang:system_info(schedulers_online))
 	end,
 	lists:foreach(Init, SwapHeights).
@@ -244,6 +244,17 @@ randomx_key(SwapHeight) ->
 			unavailable
 	end.
 
+randomx_key(SwapHeight, _) when SwapHeight < ?RANDOMX_KEY_SWAP_FREQ ->
+	randomx_key(SwapHeight);
+randomx_key(SwapHeight, BI) ->
+	KeyBlockHeight = SwapHeight - ?RANDOMX_KEY_SWAP_FREQ,
+	case get_block(KeyBlockHeight, BI) of
+		{ok, KeyB} ->
+			{ok, KeyB#block.hash};
+		unavailable ->
+			unavailable
+	end.
+
 get_block(Height) ->
 	case ar_node:get_block_index() of
 		[] -> unavailable;
@@ -252,15 +263,11 @@ get_block(Height) ->
 			get_block(BH, BI)
 	end.
 
-get_block(BH, BI) ->
-	Peers = ar_bridge:get_remote_peers(),
-	get_block(BH, BI, Peers).
-
-get_block(Height, BI, Peers) when is_integer(Height) ->
+get_block(Height, BI) when is_integer(Height) ->
 	{BH, _, _} = lists:nth(Height + 1, lists:reverse(BI)),
-	get_block(BH, BI, Peers);
-get_block(BH, BI, Peers) ->
-	case ar_http_iface_client:get_block(Peers, BH) of
+	get_block(BH, BI);
+get_block(BH, BI) ->
+	case ar_network:get_block(BH) of
 		unavailable ->
 			unavailable;
 		B ->
@@ -278,15 +285,4 @@ get_block(BH, BI, Peers) ->
 					]),
 					get_block(BH, BI)
 			end
-	end.
-
-randomx_key(SwapHeight, _, _) when SwapHeight < ?RANDOMX_KEY_SWAP_FREQ ->
-	randomx_key(SwapHeight);
-randomx_key(SwapHeight, BI, Peers) ->
-	KeyBlockHeight = SwapHeight - ?RANDOMX_KEY_SWAP_FREQ,
-	case get_block(KeyBlockHeight, BI, Peers) of
-		{ok, KeyB} ->
-			{ok, KeyB#block.hash};
-		unavailable ->
-			unavailable
 	end.

@@ -60,7 +60,7 @@ start_link() ->
 %%--------------------------------------------------------------------
 init([]) ->
 	process_flag(trap_exit, true),
-	ok = ar_events:subscribe(network),
+	[ok,ok] = ar_events:subscribe([network, node]),
 	{ok, Config} = application:get_env(arweave, config),
 	%% Initialize RandomX.
 	ar_randomx_state:start(),
@@ -193,7 +193,7 @@ handle_cast(Message, #{ task_queue := TaskQueue } = State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_info({event, network, connected}, State) ->
-	?LOG_INFO("Reconnected to the network."),
+	?LOG_INFO("Connected to the network."),
 	% rejoined to the network. do nothing.
 	{noreply, State};
 handle_info({event, network, disconnected}, State) ->
@@ -204,8 +204,7 @@ handle_info(Info, State) when is_record(Info, gs_msg) ->
 	gen_server:cast(?MODULE, {gossip_message, Info}),
 	{noreply, State};
 
-handle_info({event, network, {joined, BI, Blocks}}, State) ->
-	?LOG_ERROR("JJJJJJJOINED"),
+handle_info({event, node, {joined, BI, Blocks}}, State) ->
 	{ok, _} = ar_wallets:start_link([{blocks, Blocks}]),
 	ets:insert(node_state, [
 		{block_index,	BI},

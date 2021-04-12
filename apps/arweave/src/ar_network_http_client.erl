@@ -83,13 +83,13 @@ get_info(Peer, _) ->
 		{ok, {{<<"404">>, _}, _, _, _, _}} ->
 			not_found;
 		A ->
-			?LOG_ERROR("AAAAAAAAAAAAAAAAA ~p", [A]),
+			?LOG_ERROR("DBG get_info ~p", [A]),
 			error
 	end.
 
 %% @doc Get a block hash list (by its hash) from the external peer.
 get_block_index(Peer, _) ->
-	?LOG_ERROR("AAAAAAAAAAAAAAAAA0 ~p", [Peer]),
+	?LOG_ERROR("DBG get_block_index enter ~p", [Peer]),
 	case catch
 		 ar_http:req(#{
 			method => get,
@@ -104,15 +104,35 @@ get_block_index(Peer, _) ->
 		{ok, {{<<"404">>, _}, _, _, _, _}} ->
 			not_found;
 		A ->
-			?LOG_ERROR("AAAAAAAAAAAAAAAAA ~p", [A]),
+			?LOG_ERROR("DBG get_block_index ~p", [A]),
 			error
 	end.
 
-get_block(_Peer, _H) ->
-	not_found.
+get_block(Peer, H) ->
+	?LOG_ERROR("DBG get_block enter ~p", [Peer]),
+	case catch
+		ar_http:req(#{
+			method => get,
+			peer => Peer,
+			path => prepare_block_id(H),
+			headers => p2p_headers(),
+			connect_timeout => 500,
+			timeout => 30 * 1000,
+			limit => ?MAX_BODY_SIZE
+		})
+	of
+		{ok, {{<<"200">>, _}, _, Body, _, _}} ->
+			{ok, ar_serialize:json_struct_to_block(Body)};
+		{ok, {{<<"404">>, _}, _, _, _, _}} ->
+			not_found;
+		A ->
+			?LOG_ERROR("DBG get_block error ~p", [A]),
+			error
+	end.
 
 get_tx(Peer, TXID) ->
-	case handle_tx_response(
+	?LOG_ERROR("DBG get_tx ~p enter ~p", [TXID, Peer]),
+	case catch
 		ar_http:req(#{
 			method => get,
 			peer => Peer,
@@ -122,27 +142,36 @@ get_tx(Peer, TXID) ->
 			timeout => 60 * 1000,
 			limit => ?MAX_BODY_SIZE
 		})
-	) of
-		#tx{} = TX ->
-			case ar_tx:verify_tx_id(TXID, TX) of
-				false ->
-					?LOG_WARNING([
-						{event, peer_served_invalid_tx},
-						{peer, ar_util:format_peer(Peer)},
-						{tx, ar_util:encode(TXID)}
-					]),
-					not_found;
-				true ->
-					{ok, TX}
+	of
+		{ok, {{<<"200">>, _}, _, Body, _, _}} ->
+			case catch ar_serialize:json_struct_to_tx(Body) of
+				TX when is_record(TX, tx) ->
+					case ar_tx:verify_tx_id(TXID, TX) of
+						false ->
+							?LOG_WARNING([
+								{event, peer_served_invalid_tx},
+								{peer, ar_util:format_peer(Peer)},
+								{tx, ar_util:encode(TXID)}
+							]),
+							error;
+						true ->
+							{ok, TX}
+					end;
+				_ -> not_found
 			end;
+		{ok, {{<<"404">>, _}, _, _, _, _}} ->
+			not_found;
+		{ok, {{<<"410">>, _}, _, _, _, _}} ->
+			not_found;
 		_ ->
-			not_found
+			error
 	end.
 
 
 
 %% @doc Get a bunch of wallets by the given root hash from external peers.
 get_wallet_list_chunk(Peer, {H, Cursor}) ->
+	?LOG_ERROR("DBG get_wallet_list_chunk ~p enter ~p", [{H, Cursor}, Peer]),
 	BasePath = "/wallet_list/" ++ binary_to_list(ar_util:encode(H)),
 	Path =
 		case Cursor of
@@ -170,17 +199,18 @@ get_wallet_list_chunk(Peer, {H, Cursor}) ->
 					?LOG_ERROR([
 						{event, got_unexpected_wallet_list_chunk_deserialization_result},
 						{deserialization_result, DeserializationResult}
-					])
-					%get_wallet_list_chunk(Peers, H, Cursor)
+					]),
+					unavailable
 			end;
 		Response ->
-			skip
+			not_found
 	end;
 get_wallet_list_chunk(Peer, H) ->
 	get_wallet_list_chunk(Peer, {H, start}).
 
 %% @doc Get a wallet list by the given block hash from external peers.
 get_wallet_list(Peer, H) ->
+	?LOG_ERROR("DBG get_wallet_list ~p enter ~p", [H, Peer]),
 	Response =
 		ar_http:req(#{
 			method => get,
@@ -191,8 +221,10 @@ get_wallet_list(Peer, H) ->
 	case Response of
 		{ok, {{<<"200">>, _}, _, Body, _, _}} ->
 			{ok, ar_serialize:json_struct_to_wallet_list(Body)};
-		{ok, {{<<"404">>, _}, _, _, _, _}} -> not_found;
-		_ -> unavailable
+		{ok, {{<<"404">>, _}, _, _, _, _}} ->
+			not_found;
+		_ ->
+			unavailable
 	end.
 
 %%
@@ -245,25 +277,12 @@ safe_get_vals(Keys, Props) ->
 		Vals  -> {ok, lists:reverse(Vals)}
 	end.
 
+%% @doc Generate an appropriate URL for a block by its identifier.
+prepare_block_id({ID, _, _}) ->
+	prepare_block_id(ID);
+prepare_block_id(ID) when is_binary(ID) ->
+	"/block/hash/" ++ binary_to_list(ar_util:encode(ID));
+prepare_block_id(ID) when is_integer(ID) ->
+	"/block/height/" ++ integer_to_list(ID).
 
-%% @doc Process the response of an /block call.
-handle_block_response(Peer, {ok, {{<<"200">>, _}, _, Body, _, _}}, BlockType) ->
-	case catch ar_serialize:json_struct_to_block(Body) of
-		B when is_record(B, block), BlockType == block_shadow ->
-			{shadow, B};
-		B when is_record(B, block), BlockType == full_block ->
-			{full, B};
-		_ ->
-			not_found
-	end;
-handle_block_response(_, _, _) ->
-	not_found.
 
-%% @doc Process the response of a /tx call.
-handle_tx_response({ok, {{<<"200">>, _}, _, Body, _, _}}) ->
-	case catch ar_serialize:json_struct_to_tx(Body) of
-		TX when is_record(TX, tx) -> TX;
-		_ -> not_found
-	end;
-handle_tx_response(_Response) ->
-	not_found.
