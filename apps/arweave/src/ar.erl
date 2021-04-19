@@ -53,7 +53,6 @@
 		ar_difficulty_tests,
 		ar_retarget,
 		ar_weave,
-		ar_join,
 		ar_tx_blacklist_tests,
 		ar_data_sync_tests,
 		ar_header_sync_tests,

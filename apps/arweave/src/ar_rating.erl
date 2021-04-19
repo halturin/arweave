@@ -149,10 +149,10 @@ get_banned() ->
 			 end,
 	MapAllBin = ar_kv:select(DB, Filter),
 	maps:fold(fun(K,V,A) ->
-						Rating = binary_to_term(V),
-						[{binary_to_term(K), Rating#rating.r,
-						 Rating#rating.host, Rating#rating.port} | A]
-					end, [], MapAllBin).
+		Rating = binary_to_term(V),
+		PeerID = binary_to_term(K),
+		maps:put(PeerID, {Rating#rating.r, Rating#rating.host, Rating#rating.port, Rating#rating.ban}, A)
+	end, #{}, MapAllBin).
 
 get_top(N) ->
 	DB = gen_server:call(?MODULE, get_db),
@@ -299,6 +299,27 @@ handle_cast(Msg, State) ->
 %% @end
 %%--------------------------------------------------------------------
 
+% just got a new peer
+handle_info({event, peer, {joined, Peer, Host, Port}}, State) ->
+	% check whether we had a peering with this Peer
+	BinPeer = term_to_binary(Peer),
+	Rating = case ar_kv:get(State#state.db, BinPeer) of
+		not_found ->
+			R = #rating{host = Host, port = Port},
+			ok = ar_kv:put(State#state.db, BinPeer, term_to_binary(R)),
+			R;
+		{ok, R} ->
+			binary_to_term(R)
+	end,
+	ets:insert(?MODULE, {{peer, Peer}, Rating}),
+	{noreply, State};
+
+% peer just left
+handle_info({event, peer, {left, Peer}}, State) ->
+	update_rating(Peer, State#state.db),
+	ets:delete(?MODULE, {peer, Peer}),
+	{noreply, State};
+
 handle_info({event, peer, {Act, Kind, Request}}, State)
 	when is_record(Request, event_peer) ->
 	Peer = Request#event_peer.peer,
@@ -327,7 +348,7 @@ handle_info({event, peer, {Act, Kind, Request}}, State)
 					Rating1 = Rating#rating{
 						rate_group = RG,
 						last_update = T,
-						ban = true
+						ban = B
 					},
 					ets:insert(?MODULE, {{peer, Peer}, Rating1}),
 					update_rating(Peer, State#state.db),
@@ -337,35 +358,13 @@ handle_info({event, peer, {Act, Kind, Request}}, State)
 					RG = maps:put({Act, Positive}, {R1, History1}, Rating#rating.rate_group),
 					Rating1 = Rating#rating{
 						rate_group = RG,
-						last_update = T,
-						ban = false
+						last_update = T
 					},
 					ets:insert(?MODULE, {{peer, Peer}, Rating1}),
 					PeersGotChanges = maps:put(Peer, true, State#state.peers_got_changes),
 					{noreply, State#state{peers_got_changes = PeersGotChanges}}
 			end
 	end;
-
-% just got a new peer
-handle_info({event, peer, {joined, Peer, Host, Port}}, State) ->
-	% check whether we had a peering with this Peer
-	BinPeer = term_to_binary(Peer),
-	Rating = case ar_kv:get(State#state.db, BinPeer) of
-		not_found ->
-			R = #rating{host = Host, port = Port},
-			ok = ar_kv:put(State#state.db, BinPeer, term_to_binary(R)),
-			R;
-		{ok, R} ->
-			binary_to_term(R)
-	end,
-	ets:insert(?MODULE, {{peer, Peer}, Rating}),
-	{noreply, State};
-
-% peer just left
-handle_info({event, peer, {left, Peer}}, State) ->
-	update_rating(Peer, State#state.db),
-	ets:delete(?MODULE, {peer, Peer}),
-	{noreply, State};
 
 handle_info(Info, State) ->
 	?LOG_ERROR([{event, unhandled_info}, {info, Info}]),

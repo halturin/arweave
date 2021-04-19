@@ -139,8 +139,9 @@ handle_call(Request, _From, State) ->
 %%									{stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_cast({send, _From, Value}, State) ->
-	[Pid ! {event, State#state.name, Value} || Pid <- maps:keys(State#state.subscribers)],
+handle_cast({send, From, Value}, State) ->
+	% send to the subscribers except themself
+	[Pid ! {event, State#state.name, Value} || Pid <- maps:keys(State#state.subscribers), Pid /= From],
 	{noreply, State};
 handle_cast(Msg, State) ->
 	?LOG_ERROR([{event, unhandled_cast}, {module, ?MODULE}, {message, Msg}]),

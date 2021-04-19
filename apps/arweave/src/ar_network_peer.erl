@@ -126,7 +126,7 @@ handle_call({request, Request, Args}, _From, State) when is_atom(Request) ->
 			},
 			ar_events:send(peer, {response, malformed, Event}),
 			?LOG_ERROR("Call '~p:~p'(peer id:~p) failed: ~p",
-					   [State#state.module, Request, State#state.peer_id, Error]),
+					[State#state.module, Request, State#state.peer_id, Error]),
 			{reply, error, State}
 	end;
 
@@ -161,7 +161,7 @@ handle_cast(validate_time, State) when State#state.validate_time == false ->
 		State#state.peer_id,
 		State#state.peer_ip,
 		State#state.peer_port
-	 },
+	},
 	ar_events:send(peer, Joined),
 	?LOG_ERROR("0000000000000000 ~p just joined", [State#state.peer_ipport]),
 	gen_server:cast(self(), get_peers),
@@ -170,7 +170,17 @@ handle_cast(validate_time, State) when State#state.validate_time == false ->
 		peer_ip => State#state.peer_ip,
 		peer_port => State#state.peer_port
 	},
-	ar_network_handler_sup:start_link(3, Args),
+	case ar_rating:get(State#state.peer_id) of
+		{Rating, _Host, _Port, _Ban} when Rating > 1000000 ->
+			ar_network_handler_sup:start_link(9, Args);
+		{Rating, _Host, _Port, _Ban} when Rating > 100000 ->
+			ar_network_handler_sup:start_link(7, Args);
+		{Rating, _Host, _Port, _Ban} when Rating > 10000 ->
+			ar_network_handler_sup:start_link(5, Args);
+		_ ->
+			% for the rest - use the default number of handlers
+			ar_network_handler_sup:start_link(1, Args)
+	end,
 	{noreply, State#state{fails = 0}};
 
 handle_cast(validate_time, State) ->
@@ -277,7 +287,13 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 validate_network(Info, State) ->
 	PeerID = list_to_binary(lists:flatten(io_lib:format("~p",[State#state.peer_ipport]))),
+	% make sure if this node hasn't been banned earlier
+	Banned = ar_rating:get_banned(),
+	HasBanned = maps:get(PeerID, Banned, false),
 	case proplists:get_value(name, Info) of
+		_ when HasBanned /= false ->
+			?LOG_INFO("Peer is banned. Stop peering. (details: ~p)", [HasBanned]),
+			{stop, normal, State};
 		<<?NETWORK_NAME>> ->
 			State1 = State#state{
 				fails = 0,

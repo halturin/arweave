@@ -23,8 +23,10 @@
 
 -export([]).
 
--include_lib("arweave/include/ar.hrl").
 -include_lib("arweave/include/ar_config.hrl").
+
+%% The time in milliseconds to wait before retrying a failed join attempt.
+-define(REJOIN_TIMEOUT, 3 * 1000).
 
 -record(state, {
 	joining = false,
@@ -198,8 +200,11 @@ handle_cast({trail_blocks, Behind, B, BI}, State) when Behind == 0; B#block.heig
 	ar_arql_db:populate_db(?BI_TO_BHL(BI)),
 	%ar_node_state:init(BI),
 	ar_randomx_state:init(BI),
-	ar_events:send(node, {joined, BI, State#state.blocks}),
-	ar:console("Joined the Arweave network successfully.~n");
+	% restore the block order
+	Blocks = lists:reverse(State#state.blocks),
+	ar_events:send(node, {joined, BI, Blocks}),
+	ar:console("Joined the Arweave network successfully.~n"),
+	{noreply, State#state{blocks = Blocks}};
 
 handle_cast({trail_blocks, Behind, B, BI}, State) when ?IS_BLOCK(B) ->
 	?LOG_ERROR("DBG trailing ... ~p", [Behind]),

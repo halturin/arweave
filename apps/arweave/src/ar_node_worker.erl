@@ -275,7 +275,6 @@ handle_info(Info, State) ->
 %% @end
 %%--------------------------------------------------------------------
 terminate(Reason, #{ miner := Miner }) ->
-	ar_http_iface_server:stop(),
 	case ets:lookup(node_state, is_joined) of
 		[{_, true}] ->
 			case Miner of
@@ -296,6 +295,7 @@ terminate(Reason, #{ miner := Miner }) ->
 		_ ->
 			ok
 	end,
+	ar_events:send(node, worker_terminated),
 	?LOG_INFO([
 		{event, ar_node_worker_terminated},
 		{module, ?MODULE},
@@ -664,11 +664,11 @@ apply_block(State, BShadow, [PrevB | _] = PrevBlocks) ->
 	[{block_index, BI}] = ets:lookup(node_state, block_index),
 	[{tx_statuses, Mempool}] = ets:lookup(node_state, tx_statuses),
 	Timestamp = erlang:timestamp(),
-	{TXs, MissingTXIDs} = pick_txs(BShadow#block.txs, Mempool),
+	{HavingTXs, MissingTXIDs} = pick_txs(BShadow#block.txs, Mempool),
 	case MissingTXIDs of
 		[] ->
-			SizeTaggedTXs = ar_block:generate_size_tagged_list_from_txs(TXs),
-			B = BShadow#block{ txs = TXs, size_tagged_txs = SizeTaggedTXs },
+			SizeTaggedTXs = ar_block:generate_size_tagged_list_from_txs(HavingTXs),
+			B = BShadow#block{ txs = HavingTXs, size_tagged_txs = SizeTaggedTXs },
 			PrevWalletList = PrevB#block.wallet_list,
 			PrevRewardPool = PrevB#block.reward_pool,
 			PrevHeight = PrevB#block.height,
@@ -711,12 +711,35 @@ apply_block(State, BShadow, [PrevB | _] = PrevBlocks) ->
 				end
 			end;
 		_ ->
+			?LOG_ERROR("MISSING TXS..."),
 			?LOG_INFO([{event, missing_txs_for_block}, {count, length(MissingTXIDs)}]),
-			Self = self(),
-			monitor(
-				process,
-				PID = spawn(fun() -> get_missing_txs_and_retry(BShadow, Mempool, Self) end)
-			),
+			PID = spawn(fun() ->
+				case ar_network:get_txs(MissingTXIDs) of
+					unavailable ->
+						?LOG_WARNING([
+							{event, ar_node_worker_could_not_find_block_txs},
+							{block, ar_util:encode(BShadow#block.indep_hash)}
+						]);
+					{partial, _, _} ->
+						?LOG_WARNING([
+							{event, ar_node_worker_could_not_find_block_txs},
+							{block, ar_util:encode(BShadow#block.indep_hash)}
+						]);
+					GotMissingTXs ->
+						% join with HavingTXs and transfomr them into the map (id => TX)
+						JoinedMapTXs = lists:foldl(fun(TX, Acc) ->
+							maps:put(TX#tx.id, TX, Acc)
+						end, #{}, lists:append(HavingTXs, GotMissingTXs)),
+						% restore an order of the transacrions
+						TXs = lists:map(fun(TXID) ->
+							% Let it crash if it hasn't been found. Shouldn't be, actually
+							maps:get(TXID, JoinedMapTXs)
+						end, BShadow#block.txs),
+						Message = {cache_missing_txs, BShadow#block.indep_hash, TXs},
+						gen_server:cast(?MODULE, Message)
+				end
+			end),
+			monitor(process, PID),
 			BH = BShadow#block.indep_hash,
 			{noreply, State#{
 				blocks_missing_txs => sets:add_element(BH, BlocksMissingTXs),
@@ -785,18 +808,6 @@ validate_wallet_list(B, WalletList, RewardPool, Height) ->
 			error;
 		{ok, RootHash} ->
 			{ok, RootHash}
-	end.
-
-get_missing_txs_and_retry(BShadow, Mempool, Worker) ->
-	Peers = ar_bridge:get_remote_peers(),
-	case ar_http_iface_client:get_txs(Peers, Mempool, BShadow) of
-		{ok, TXs} ->
-			gen_server:cast(Worker, {cache_missing_txs, BShadow#block.indep_hash, TXs});
-		_ ->
-			?LOG_WARNING([
-				{event, ar_node_worker_could_not_find_block_txs},
-				{block, ar_util:encode(BShadow#block.indep_hash)}
-			])
 	end.
 
 apply_validated_block(State, B, PrevBlocks, BI, BlockTXPairs) ->

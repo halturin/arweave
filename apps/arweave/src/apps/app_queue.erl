@@ -97,7 +97,7 @@ send_tx(S, TX) ->
 				StartHeight + ?CONFIRMATION_DEPTH
 			);
 		timeout ->
-			timer:sleep(?REJOIN_TIMEOUT),
+			timer:sleep(3000),
 			send_tx(S, TX)
 	end.
 

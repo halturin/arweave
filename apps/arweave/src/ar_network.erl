@@ -22,6 +22,7 @@
 
 -export([
 	broadcast/2,
+	broadcast/3,
 	add_peer_candidate/2,
 	is_connected/0,
 
@@ -46,7 +47,7 @@
 %% Since - timestamp of the online/offline statement change
 
 %% keep this number of joined peers, but do not exceed this limit.
--define(PEERS_JOINED_MAX, 10).
+-define(PEERS_JOINED_MAX, 20).
 %% do not bother the peer during this time if its went offline
 -define(PEER_SLEEP_TIME, 60). % in minutes
 %% we should rotate the peers
@@ -68,16 +69,18 @@
 
 %%--------------------------------------------------------------------
 %% @doc
-%% Sends Block to all active(joined) peers. Returns a reference in order to
-%% handle {sent, block, Ref} message on a sender side. This message is
-%% sending once all the peering process are reported on this request.
-%% @spec broadcast(block, Block) -> {ok, Ref} | {error, Error}
+%% Sends Block/TX to the joined peers.
 %% @end
 %%--------------------------------------------------------------------
-broadcast(block, _Block) ->
-	ok;
-broadcast(tx, _TX) ->
-	ok.
+broadcast(block, {Block, BDS}) ->
+	broadcast(block, {Block, BDS}, {#{}, ?PEERS_JOINED_MAX});
+broadcast(tx, TX) ->
+	broadcast(tx, TX, {#{}, ?PEERS_JOINED_MAX}).
+
+broadcast(block, {Block, BDS}, {ExcludePeers, Max}) ->
+	request({broadcast, ExcludePeers, Max}, {post_block, {Block, BDS}}, 60000);
+broadcast(tx, TX, {ExcludePeers, Max}) ->
+	request({broadcast, ExcludePeers, Max}, {post_tx, TX}, 60000).
 
 %% @doc
 %% add_peer_candidate adds a record with given IP address and Port number for the
@@ -118,7 +121,7 @@ get_block_shadow(B) ->
 	case request(sequential, {get_block, B}) of
 		Block when ?IS_BLOCK(Block), length(Block#block.txs) > ?BLOCK_TX_COUNT_LIMIT ->
 			?LOG_ERROR("txs count (~p) exceeds the limit (~p)",
-					   [length(Block#block.txs), ?BLOCK_TX_COUNT_LIMIT]),
+					[length(Block#block.txs), ?BLOCK_TX_COUNT_LIMIT]),
 			unavailable;
 		Block when ?IS_BLOCK(Block) ->
 			Block;
@@ -158,7 +161,7 @@ get_txs(TXs) ->
 	Result ->
 		% transform the map into the list
 		% keeping the same order we had in TXs
-		lists:foldl(fun(ID, Acc) ->
+		Reversed = lists:foldl(fun(ID, Acc) ->
 			case maps:get(ID, Result, unknown) of
 				_ when Acc == error ->
 					unavailable;
@@ -167,7 +170,9 @@ get_txs(TXs) ->
 				Tx ->
 					[Tx|Acc]
 			end
-		end, [], TXs)
+		end, [], TXs),
+		% restore the order
+		lists:reverse(Reversed)
 	end.
 get_wallet_list(Hash) ->
 	request(sequential, {get_wallet_list, Hash}, 10000).
@@ -185,6 +190,7 @@ get_wallet_list_chunk(ID, Cursor) ->
 start_link() ->
 	gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
+%%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
 
@@ -223,7 +229,7 @@ init([]) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_call(Request, _From, State) ->
-	?LOG_ERROR("unhandled call: ~p", [Request]),
+	?LOG_ERROR([{event, unhandled_call}, {request, Request}]),
 	{reply, ok, State}.
 
 %%--------------------------------------------------------------------
@@ -282,7 +288,7 @@ handle_cast(peering, State) ->
 			% get all offline peers. the same format [{IP, Port}]
 			OfflinePeers = peers_offline(),
 			% transform list of joined peers into the same format [{IP, Port}]
-			OnlinePeers = lists:foldl(fun({IP,Port,_Pid},M) ->
+			OnlinePeers = lists:foldl(fun({IP,Port,_Pid,_PeerID},M) ->
 				maps:put({IP,Port},ok,M)
 			end, #{}, Peers),
 			% merge them all together (excluding already joined peers) into
@@ -318,7 +324,7 @@ handle_cast(peering, State) ->
 			{noreply, State#state{peering_timer = T}}
 	end;
 handle_cast(Msg, State) ->
-	?LOG_ERROR([{event, unhandled_cast}, {module, ?MODULE}, {message, Msg}]),
+	?LOG_ERROR([{event, unhandled_cast}, {message, Msg}]),
 	{noreply, State}.
 
 %%--------------------------------------------------------------------
@@ -340,10 +346,13 @@ handle_info({event, node, ready}, State) ->
 	%% Now we can serve incoming requests. Start the HTTP server.
 	ok = ar_http_iface_server:start(),
 	{noreply, State#state{ready = true}};
-handle_info({event, node, _}, State) ->
+handle_info({event, node, Reason}, State) ->
+	% Reason could be 'worker_terminated', so we should restart the peering
+	% and ar_node_worker will be restarted by ar_sup supervisor
 	timer:cancel(State#state.peering_timer),
-	% stop any peering if node is not in 'ready' state
-	erlang:exit(whereis(ar_network_peer_sup), maintenance),
+	% stop any peering
+	erlang:exit(whereis(ar_network_peer_sup), Reason),
+	ar_http_iface_server:stop(),
 	{noreply, State#state{ready = false, peering_timer = undefined}};
 handle_info({event, peer, {joined, PeerID, IP, Port}}, State) ->
 	Joined = peers_joined(),
@@ -379,7 +388,7 @@ handle_info({'DOWN', _Ref, process, Pid, Reason}, State) ->
 			{noreply, State}
 	end;
 handle_info(Info, State) ->
-	?LOG_ERROR([{event, unhandled_info}, {module, ?MODULE}, {info, Info}]),
+	?LOG_ERROR([{event, unhandled_info}, {info, Info}]),
 	{noreply, State}.
 
 %%--------------------------------------------------------------------
@@ -393,8 +402,8 @@ handle_info(Info, State) ->
 %% @spec terminate(Reason, State) -> void()
 %% @end
 %%--------------------------------------------------------------------
-terminate(_Reason, _State) ->
-	?LOG_INFO([{event, ar_network_terminated}, {module, ?MODULE}]),
+terminate(Reason, _State) ->
+	?LOG_INFO([{event, ar_network_terminated}, {reason, Reason}]),
 	ok.
 
 %%--------------------------------------------------------------------
@@ -440,11 +449,30 @@ peering(IP, Port, Options)->
 	end.
 
 peers_joined() ->
-	% returns list of {IP, Port, Pid}. example: [{{127,0,0,1}, 1984, <0.12.123>}]
+	% returns list of {IP, Port, Pid, PeerID}. example: [{{127,0,0,1}, 1984, <0.12.123>, <<"PeerID">>}]
 	% where Pid - is a peering process handler (module: ar_network_peer)
 	ets:select(ar_network, [{{{'$1','$11'},'$2','$3','$4'},
 							[{is_pid, '$2'}, {'=<', '$3', os:system_time(second)}],
-							[{{'$1','$11', '$2'}}]}]).
+							[{{'$1','$11','$2','$4'}}]}]).
+peers_top_joined() ->
+	% ordered (by Rating) list of {PeerID, Rating, Host, Port}
+	TopJoined = ar_rating:get_top_joined(?PEERS_JOINED_MAX),
+	% create a map of joined peers using PeerID => {IP, Port, Pid, PeerID}
+	JoinedMap = lists:foldl(fun({IP,Port,Pid,PeerID}, Acc) ->
+		maps:put(PeerID, {IP, Port, Pid, PeerID}, Acc)
+	end, #{}, peers_joined()),
+	% create a list according to the TopJoined order
+	Top = lists:foldl(fun({PeerID, _Rating, _Host, _Port}, Acc) ->
+		case maps:get(PeerID, JoinedMap, false) of
+			false ->
+				Acc;
+			Peer ->
+				[Peer|Acc]
+		end
+	end, [], TopJoined),
+	lists:reverse(Top).
+
+
 peers_offline() ->
 	ets:select(ar_network, [{{{'$1','$11'},'$2','$3','$4'},[{'==', false, {is_pid, '$2'}}],[{{'$1','$11'}}]}]).
 peer_went_offline(Pid, Reason) ->
@@ -467,7 +495,7 @@ peer_went_offline(Pid, Reason) ->
 %	sequential - making request sequentially until the correct answer will be received
 %	{sequential, N} - the same, but limit the number of retries
 %	broadcast  - broadcasting request and get all answers as a result
-%	{broadcast, N} - broadcasting request to gather N valid answers
+%	{broadcast, ExcludePeers, N} - broadcasting request to gather N valid answers excluding given peers
 %	parallel   - making request in parallel. Args must be a list.
 %
 %	returns:
@@ -482,24 +510,32 @@ request(Type, {Request, Args}) ->
 	request(Type, {Request, Args}, ?DEFAULT_REQUEST_TIMEOUT).
 
 request(sequential, {Request, Args}, Timeout) ->
-	Peers = peers_joined(),
+	Peers = peers_top_joined(),
 	do_request_sequential({Request, Args}, Timeout, Peers);
 request({sequential, Max}, {Request, Args}, Timeout) ->
-	Peers = lists:sublist(peers_joined(), Max),
+	Peers = lists:sublist(peers_top_joined(), Max),
 	do_request_sequential({Request, Args}, Timeout, Peers);
 
 request(broadcast, {Request, Args}, Timeout) ->
-	Peers = peers_joined(),
+	Peers = peers_top_joined(),
 	N = length(Peers),
 	do_request_broadcast({Request, Args}, N, Timeout, Peers);
-request({broadcast, N}, {Request, Args}, Timeout) ->
-	Peers = peers_joined(),
+request({broadcast, #{}, Max}, {Request, Args}, Timeout) ->
+	Peers = lists:sublist(peers_top_joined(), Max),
+	N = length(Peers),
+	do_request_broadcast({Request, Args}, N, Timeout, Peers);
+request({broadcast, ExcludePeers, Max}, {Request, Args}, Timeout) ->
+	PeersFiltered = lists:filter(fun(P) ->
+		not maps:is_key(P, ExcludePeers)
+	end, peers_top_joined()),
+	Peers = lists:sublist(PeersFiltered, Max),
+	N = length(Peers),
 	do_request_broadcast({Request, Args}, N, Timeout, Peers);
 
 request(parallel, {_Request, []}, _Timeout) ->
 	[];
 request(parallel, {Request, Args}, Timeout) ->
-	Peers = peers_joined(),
+	Peers = peers_top_joined(),
 	do_request_parallel({Request, Args}, Timeout, Peers).
 
 %
@@ -518,8 +554,9 @@ do_request_sequential({Request, Args}, Timeout, Peers) ->
 
 do_sequential_spawn(Origin, {_Request, Args}, _Timeout, []) ->
 	Origin ! {final, {nopeers, Args}};
-do_sequential_spawn(Origin, {Request, Args}, Timeout, [{IP, Port, Pid}|Peers]) ->
-	?LOG_ERROR("DBG do_sequential_spawn ~p: ~p", [{IP,Port,Pid}, {Request, Args}]),
+do_sequential_spawn(Origin, {Request, Args}, Timeout, [Peer|Peers]) ->
+	{_IP, _Port, Pid, _PeerID} = Peer,
+	?LOG_ERROR("DBG do_sequential_spawn ~p: ~p", [Peer, {Request, Args}]),
 	case catch gen_server:call(Pid, {request, Request, Args}, Timeout) of
 		{result, Result} ->
 			Origin ! {final, Result};
@@ -561,8 +598,9 @@ do_broadcast_spawn(Origin, {Request, Args}, {0,N,Results}, Timeout, Peers) ->
 	after Timeout ->
 		Origin ! {final, {timeout, Results}}
 	end;
-do_broadcast_spawn(Origin, {Request, Args}, {S,N,Results}, Timeout, [{_IP, _Port, Pid}|Peers]) ->
+do_broadcast_spawn(Origin, {Request, Args}, {S,N,Results}, Timeout, [Peer|Peers]) ->
 	Receiver = self(),
+	{_IP, _Port, Pid, _PeerID} = Peer,
 	spawn_link(fun() ->
 			case catch gen_server:call(Pid, {request, Request, Args}, Timeout) of
 				{result, Result} ->
@@ -593,7 +631,7 @@ do_parallel_spawn(Origin, {_Request, []}, {0, Results}, _Timeout, _Peers) ->
 do_parallel_spawn(Origin, {_Request, Args}, {0, Results}, _Timeout, []) ->
 	Origin ! {final, {nopeers, Results, Args}};
 do_parallel_spawn(Origin, {Request, Args}, {N, Results}, Timeout, Peers)
-  								when N > ?MAX_PARALLEL_REQUESTS; Args == []; Peers == [] ->
+								when N > ?MAX_PARALLEL_REQUESTS; Args == []; Peers == [] ->
 	receive
 		{error, A} ->
 			% exclude this peer since something wrong with him
@@ -608,15 +646,16 @@ do_parallel_spawn(Origin, {Request, Args}, {N, Results}, Timeout, Peers)
 	after Timeout*2 ->
 		Origin ! {final, {timeout, Results}}
 	end;
-do_parallel_spawn(Origin, {Request, [A|Args]}, {N, Results}, Timeout, [{IP, Port, Pid}|Peers]) ->
+do_parallel_spawn(Origin, {Request, [A|Args]}, {N, Results}, Timeout, [Peer|Peers]) ->
 	Receiver = self(),
+	{_IP, _Port, Pid, _PeerID} = Peer,
 	spawn_link(fun() ->
 			case catch gen_server:call(Pid, {request, Request, A}, Timeout) of
 				{result, Result} ->
 					?LOG_ERROR("DBG do_parallel_spawn OK ~p", [{Pid, Request, A}]),
-					Receiver ! {result, A, Result, {IP, Port, Pid}};
+					Receiver ! {result, A, Result, Peer};
 				not_found ->
-					Receiver ! {not_found, A, {IP, Port, Pid}};
+					Receiver ! {not_found, A, Peer};
 				E ->
 					?LOG_ERROR("DBG do_parallel_spawn (~p) ~p", [{Pid, Request, A}, E]),
 					Receiver ! {error, A}

@@ -17,12 +17,17 @@
 	get_block/2,
 	get_tx/2,
 	get_wallet_list/2,
-	get_wallet_list_chunk/2
+	get_wallet_list_chunk/2,
+	get_chunk/2,
+	get_sync_record/2,
+	post_tx/2,
+	post_block/2
 ]).
 
 -include_lib("arweave/include/ar.hrl").
 -include_lib("arweave/include/ar_config.hrl").
 -include_lib("arweave/include/ar_wallets.hrl").
+-include_lib("arweave/include/ar_data_sync.hrl").
 
 
 
@@ -180,7 +185,7 @@ get_wallet_list_chunk(Peer, {H, Cursor}) ->
 			_ ->
 				BasePath ++ "/" ++ binary_to_list(ar_util:encode(Cursor))
 		end,
-	Response =
+	case catch
 		ar_http:req(#{
 			method => get,
 			peer => Peer,
@@ -189,8 +194,8 @@ get_wallet_list_chunk(Peer, {H, Cursor}) ->
 			limit => ?MAX_SERIALIZED_WALLET_LIST_CHUNK_SIZE,
 			timeout => 10 * 1000,
 			connect_timeout => 1000
-		}),
-	case Response of
+		})
+	of
 		{ok, {{<<"200">>, _}, _, Body, _, _}} ->
 			case ar_serialize:etf_to_wallet_chunk_response(Body) of
 				{ok, #{ next_cursor := NextCursor, wallets := Wallets }} ->
@@ -202,7 +207,7 @@ get_wallet_list_chunk(Peer, {H, Cursor}) ->
 					]),
 					unavailable
 			end;
-		Response ->
+		_ ->
 			not_found
 	end;
 get_wallet_list_chunk(Peer, H) ->
@@ -211,14 +216,14 @@ get_wallet_list_chunk(Peer, H) ->
 %% @doc Get a wallet list by the given block hash from external peers.
 get_wallet_list(Peer, H) ->
 	?LOG_ERROR("DBG get_wallet_list ~p enter ~p", [H, Peer]),
-	Response =
+	case catch
 		ar_http:req(#{
 			method => get,
 			peer => Peer,
 			path => "/block/hash/" ++ binary_to_list(ar_util:encode(H)) ++ "/wallet_list",
 			headers => p2p_headers()
-		}),
-	case Response of
+		})
+	 of
 		{ok, {{<<"200">>, _}, _, Body, _, _}} ->
 			{ok, ar_serialize:json_struct_to_wallet_list(Body)};
 		{ok, {{<<"404">>, _}, _, _, _, _}} ->
@@ -226,6 +231,105 @@ get_wallet_list(Peer, H) ->
 		_ ->
 			unavailable
 	end.
+
+get_sync_record(Peer, _) ->
+	case catch
+		ar_http:req(#{
+			peer => Peer,
+			method => get,
+			path => "/data_sync_record",
+			timeout => 5 * 1000,
+			connect_timeout => 500,
+			limit => ?MAX_ETF_SYNC_RECORD_SIZE,
+			headers => [{<<"Content-Type">>, <<"application/etf">>} | p2p_headers()]
+	})
+	of
+		{ok, {{<<"200">>, _}, _, Body, _, _}} ->
+			ar_intervals:safe_from_etf(Body);
+		_ ->
+			unavailable
+	end.
+
+get_chunk(Peer, Offset) ->
+	case catch
+		ar_http:req(#{
+			peer => Peer,
+			method => get,
+			path => "/chunk/" ++ integer_to_binary(Offset),
+			timeout => 30 * 1000,
+			connect_timeout => 500,
+			limit => ?MAX_SERIALIZED_CHUNK_PROOF_SIZE,
+			headers => p2p_headers()
+	})
+	of
+		{ok, {{<<"200">>, _}, _, Body, _, _}} ->
+			ar_serialize:json_map_to_chunk_proof(jiffy:decode(Body, [return_maps]));
+		_ ->
+			unavailable
+	end.
+
+post_tx(Peer, TX) ->
+	TXSize = byte_size(TX#tx.data),
+	case catch
+		ar_http:req(#{
+			method => post,
+			peer => Peer,
+			path => "/tx",
+			headers => p2p_headers() ++ [{<<"arweave-tx-id">>, ar_util:encode(TX#tx.id)}],
+			body => ar_serialize:jsonify(ar_serialize:tx_to_json_struct(TX)),
+			connect_timeout => 500,
+			timeout => max(3, min(60, TXSize * 8 div ?TX_PROPAGATION_BITS_PER_SECOND)) * 1000
+	})
+	of
+		{ok, _} ->
+			{ok, sent};
+		_ ->
+			error
+	end.
+
+post_block(Peer, {Block, BDS}) ->
+	{BlockProps} = ar_serialize:block_to_json_struct(Block),
+	BlockShadowProps =
+		case Block#block.height >= ar_fork:height_2_4() of
+			true ->
+				BlockProps;
+			false ->
+				case Block#block.hash_list of
+					unset ->
+						BlockProps;
+					_ ->
+						ShortHashList =
+							lists:map(
+								fun ar_util:encode/1,
+								lists:sublist(Block#block.hash_list, ?STORE_BLOCKS_BEHIND_CURRENT)
+							),
+						[{<<"hash_list">>, ShortHashList} | BlockProps]
+				end
+		end,
+	PostProps = [
+		{<<"new_block">>, {BlockShadowProps}},
+		%% Add the P2P port field to be backwards compatible with nodes
+		%% running the old version of the P2P port feature.
+		{<<"port">>, ?DEFAULT_HTTP_IFACE_PORT},
+		{<<"block_data_segment">>, ar_util:encode(BDS)}
+	],
+	case catch
+		ar_http:req(#{
+			method => post,
+			peer => Peer,
+			path => "/block",
+			headers =>
+				p2p_headers() ++ [{<<"arweave-block-hash">>, ar_util:encode(Block#block.indep_hash)}],
+			body => ar_serialize:jsonify({PostProps}),
+			timeout => 3 * 1000
+		})
+	of
+		{ok, _} ->
+			{ok, sent};
+		_ ->
+			error
+	end.
+
 
 %%
 %% private functions

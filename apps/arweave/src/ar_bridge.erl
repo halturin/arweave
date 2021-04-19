@@ -108,7 +108,6 @@ init([]) ->
 	%% Start the transaction distribution priority queue.
 	ok = ar_tx_queue:start_link(),
 	%% Start asking peers about their peers.
-	erlang:send_after(0, self(), get_more_peers),
 	State = #state {
 		gossip = ar_gossip:init([]),
 		external_peers = Config#config.peers
@@ -221,27 +220,7 @@ handle_info(Info, State) when is_record(Info, gs_msg) ->
 			{noreply, State1}
 	end;
 
-handle_info(get_more_peers, #state{ updater = undefined } = State) ->
-	Self = self(),
-	erlang:send_after(?GET_MORE_PEERS_TIME, Self, get_more_peers),
-	Updater = spawn(
-		fun() ->
-			Peers = ar_manage_peers:update(State#state.external_peers),
-			lists:map(fun ar_http_iface_client:add_peer/1, Peers),
-			Self ! {update_peers, remote, Peers}
-		end
-	),
-	{noreply, State#state{ updater = Updater }};
 
-handle_info(get_more_peers, State) ->
-	?LOG_WARNING([{event, ar_bridge_update_peers_process_is_stuck}]),
-	erlang:send_after(?GET_MORE_PEERS_TIME, self(), get_more_peers),
-	{noreply, State};
-
-handle_info({update_peers, remote, Peers}, State) ->
-	update_state_metrics(Peers),
-	State2 = State#state{ external_peers = Peers, updater = undefined },
-	{noreply, State2};
 
 handle_info(Info, State) ->
 	?LOG_ERROR([{event, unhandled_info}, {module, ?MODULE}, {info, Info}]),

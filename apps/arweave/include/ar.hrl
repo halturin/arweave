@@ -177,22 +177,6 @@
 %% when making an HTTP request.
 -define(HTTP_REQUEST_SEND_TIMEOUT, 60 * 1000).
 
-%% The time in milliseconds to wait before retrying a failed join attempt.
--define(REJOIN_TIMEOUT, 3 * 1000).
-
-%% The frequency in milliseconds of asking peers for their peers.
--define(GET_MORE_PEERS_TIME,  240 * 1000).
-
-%% Number of transfers for which not to score (and potentially drop)
-%% new peers.
--define(PEER_GRACE_PERIOD, 100).
-
-%% Never drop to lower than this number of peers.
--define(MINIMUM_PEERS, 4).
-
-%% Never have more than this number of peers (new peers excluded).
--define(MAXIMUM_PEERS, 20).
-
 %% Maximum allowed number of accepted requests per minute per IP.
 -define(DEFAULT_REQUESTS_PER_MINUTE_LIMIT, 900).
 
