@@ -125,7 +125,6 @@ show_help() ->
 					"The maximum number of mining processes. Default: ~B.",
 					[?NUM_MINING_PROCESSES]
 				)},
-			{"max_emitters (num)", "The maximum number of transaction propagation processes (default 2)."},
 			{"tx_propagation_parallelization (num)", "The maximum number of best peers to propagate transactions to at a time (default 4)."},
 			{"max_propagation_peers (num)", "The maximum number of best peers to propagate blocks and transactions to. Default is 50."},
 			{"sync_jobs (num)",
@@ -190,6 +189,9 @@ show_help() ->
 			{"randomx_bulk_hashing_iterations",
 				"The number of hashes RandomX generates before reporting the result back"
 				" to the Arweave miner. The faster CPU hashes, the higher this value should be."
+			},
+			{"debug",
+				"Enable extended logging."
 			}
 		]
 	),
@@ -253,8 +255,6 @@ parse_cli_args(["mining_addr", Addr|Rest], C) ->
 	parse_cli_args(Rest, C#config { mining_addr = ar_util:decode(Addr) });
 parse_cli_args(["max_miners", Num|Rest], C) ->
 	parse_cli_args(Rest, C#config { max_miners = list_to_integer(Num) });
-parse_cli_args(["max_emitters", Num|Rest], C) ->
-	parse_cli_args(Rest, C#config { max_emitters = list_to_integer(Num) });
 parse_cli_args(["new_mining_key"|Rest], C)->
 	parse_cli_args(Rest, C#config { new_key = true });
 parse_cli_args(["disk_space", Size|Rest], C) ->
@@ -309,6 +309,8 @@ parse_cli_args(["max_disk_pool_data_root_buffer_mb", Num | Rest], C) ->
 	parse_cli_args(Rest, C#config { max_disk_pool_data_root_buffer_mb = list_to_integer(Num) });
 parse_cli_args(["randomx_bulk_hashing_iterations", Num | Rest], C) ->
 	parse_cli_args(Rest, C#config { randomx_bulk_hashing_iterations = list_to_integer(Num) });
+parse_cli_args(["debug" | Rest], C) ->
+	parse_cli_args(Rest, C#config { debug = true });
 parse_cli_args([Arg|_Rest], _O) ->
 	io:format("~nUnknown argument: ~s.~n", [Arg]),
 	show_help().
@@ -348,7 +350,7 @@ start(normal, _Args) ->
 	logger:add_handler(
 		disk_log,
 		logger_disk_log_h,
-		#{ config => LoggerConfigDisk, level => info }
+		#{ config => LoggerConfigDisk, level => debug}
 	),
 	LoggerFormatterDisk = #{
 		%chars_limit => 512,
@@ -359,7 +361,12 @@ start(normal, _Args) ->
 		template => [time," [",level,"] ",file,":",line," ",msg,"\n"]
 	},
 	logger:set_handler_config(disk_log, formatter, {logger_formatter, LoggerFormatterDisk}),
-	logger:set_application_level(arweave, debug),
+	case Config#config.debug of
+		true ->
+			logger:set_application_level(arweave, debug);
+		_ ->
+			logger:set_application_level(arweave, info)
+	end,
 	%% Start the Prometheus metrics subsystem.
 	prometheus_registry:register_collector(prometheus_process_collector),
 	prometheus_registry:register_collector(ar_metrics_collector),

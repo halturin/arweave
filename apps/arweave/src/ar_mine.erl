@@ -552,10 +552,8 @@ filter_by_valid_tx_fee(TXs, Diff, Height, Wallets, Timestamp) ->
 
 process_solution(S, Hash, Nonce, MinedTXs, Diff, Timestamp) ->
 	#state {
-		parent = Parent,
 		miners = Miners,
 		current_block = #block{ indep_hash = CurrentBH },
-		poa = POA,
 		total_hashes_tried = TotalHashesTried,
 		started_at = StartedAt,
 		data_segment = BDS,
@@ -567,7 +565,7 @@ process_solution(S, Hash, Nonce, MinedTXs, Diff, Timestamp) ->
 	},
 	IndepHash = ar_weave:indep_hash(BDS, Hash, Nonce),
 	NewB = NewBBeforeHash#block{ indep_hash = IndepHash },
-	Parent ! {work_complete, CurrentBH, NewB, MinedTXs, BDS, POA},
+	ar_events:send(block, {mined, NewB, MinedTXs, CurrentBH}),
 	log_performance(TotalHashesTried, StartedAt),
 	stop_miners(Miners).
 
@@ -583,7 +581,6 @@ log_performance(TotalHashesTried, StartedAt) ->
 
 process_spora_solution(S, Hash, Nonce, SPoA, MinedTXs, Diff, Timestamp) ->
 	#state {
-		parent = Parent,
 		miners = Miners,
 		current_block = #block{ indep_hash = CurrentBH },
 		total_sporas_tried = TotalSPoRAsTried,
@@ -599,7 +596,7 @@ process_spora_solution(S, Hash, Nonce, SPoA, MinedTXs, Diff, Timestamp) ->
 	},
 	IndepHash = ar_weave:indep_hash(BDS, Hash, Nonce, SPoA),
 	NewB = NewBBeforeHash#block{ indep_hash = IndepHash },
-	Parent ! {work_complete, CurrentBH, NewB, MinedTXs, BDS, SPoA},
+	ar_events:send(block, {mined, NewB, MinedTXs, CurrentBH}),
 	log_spora_performance(TotalSPoRAsTried, TotalSPoRAsDiscovered, StartedAt),
 	stop_miners(Miners).
 

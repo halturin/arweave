@@ -107,11 +107,6 @@ parse_options([{<<"max_miners">>, MaxMiners} | Rest], Config) when is_integer(Ma
 parse_options([{<<"max_miners">>, MaxMiners} | _], _) ->
 	{error, {bad_type, max_miners, number}, MaxMiners};
 
-parse_options([{<<"max_emitters">>, Value} | Rest], Config) when is_integer(Value) ->
-	parse_options(Rest, Config#config{ max_emitters = Value });
-parse_options([{<<"max_emitters">>, Value} | _], _) ->
-	{error, {bad_type, max_emitters, number}, Value};
-
 parse_options([{<<"tx_propagation_parallelization">>, Value} | Rest], Config)
 		when is_integer(Value) ->
 	parse_options(Rest, Config#config{ tx_propagation_parallelization = Value });

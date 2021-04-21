@@ -98,7 +98,7 @@ handle_call(Request, _From, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_cast(join, State) ->
-	?LOG_ERROR("DBG join..."),
+	?LOG_ERROR("Node joining start."),
 	{ok, Config} = application:get_env(arweave, config),
 	BI =
 		case {Config#config.start_from_block_index, Config#config.init} of
@@ -146,15 +146,15 @@ handle_cast(join, State) ->
 	end;
 
 handle_cast(joining, State) when State#state.connected == false ->
-	?LOG_ERROR("DBG joining (not connected) ..."),
+	?LOG_DEBUG("Node joining. Waiting for the network connection..."),
 	%% do nothing. waiting for the {event, network, connected}
 	{noreply, State};
 
 handle_cast(joining, State) when State#state.connected ->
-	?LOG_ERROR("DBG joining ..."),
+	?LOG_DEBUG("Node joining ..."),
 	case ar_network:get_current_block_index() of
 		error ->
-			?LOG_ERROR("DBG joining (next attempt) ... "),
+			?LOG_DEBUG("Node joining (next attempt) ... "),
 			timer:send_after(?REJOIN_TIMEOUT, {'$gen_cast', joining}),
 			{noreply, State};
 		BI ->
@@ -190,13 +190,13 @@ handle_cast(joining, State) when State#state.connected ->
 	end;
 
 handle_cast({trail_blocks, Behind, B, BI}, State) when State#state.connected == false ->
-	?LOG_ERROR("DBG trailing (not connected) ... []"),
+	?LOG_DEBUG("Node joining. Trailing blocks paused. Waiting for the network connection..."),
 	Message = {trail_blocks, Behind, B, BI},
 	timer:send_after(?REJOIN_TIMEOUT, {'$gen_cast', Message}),
 	{noreply, State};
 
 handle_cast({trail_blocks, Behind, B, BI}, State) when Behind == 0; B#block.height == 0 ->
-	?LOG_ERROR("DBG trailing ... done "),
+	?LOG_DEBUG("Node joining. Trailing blocks is finished."),
 	ar_arql_db:populate_db(?BI_TO_BHL(BI)),
 	%ar_node_state:init(BI),
 	ar_randomx_state:init(BI),
@@ -207,13 +207,11 @@ handle_cast({trail_blocks, Behind, B, BI}, State) when Behind == 0; B#block.heig
 	{noreply, State#state{blocks = Blocks}};
 
 handle_cast({trail_blocks, Behind, B, BI}, State) when ?IS_BLOCK(B) ->
-	?LOG_ERROR("DBG trailing ... ~p", [Behind]),
+	?LOG_DEBUG("Node joining. Trailing block ~p...", [Behind]),
 	PreviousB = ar_network:get_block(B#block.previous_block),
 	case ?IS_BLOCK(PreviousB) of
 		true ->
-			?LOG_ERROR("DBG got block ~p. Generating size tagged list for ~p  of block ~p", [PreviousB#block.height,length(B#block.txs), B#block.height]),
 			SizeTaggedTXs = ar_block:generate_size_tagged_list_from_txs(B#block.txs),
-			?LOG_ERROR("DBG generated size tagget list for ~p txs of ~p ", [length(B#block.txs),B#block.previous_block]),
 			Blocks = [B#block{ size_tagged_txs = SizeTaggedTXs } | State#state.blocks],
 			gen_server:cast(?MODULE, {trail_blocks, Behind-1, PreviousB, BI}),
 			{noreply, State#state{blocks = Blocks}};

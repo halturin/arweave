@@ -54,6 +54,7 @@
 start_link(Args) ->
 	gen_server:start_link(?MODULE, Args, []).
 
+%%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
 
@@ -163,7 +164,6 @@ handle_cast(validate_time, State) when State#state.validate_time == false ->
 		State#state.peer_port
 	},
 	ar_events:send(peer, Joined),
-	?LOG_ERROR("0000000000000000 ~p just joined", [State#state.peer_ipport]),
 	gen_server:cast(self(), get_peers),
 	Args = #{
 		peer_id => State#state.peer_id,
@@ -224,7 +224,6 @@ handle_cast(get_peers, State) ->
 			lists:map(fun({A,B,C,D,Port}) ->
 				ar_network:add_peer_candidate({A,B,C,D}, Port)
 			end, Peers),
-			?LOG_ERROR("0000000000000000 ~p time to die", [State#state.peer_ipport]),
 			{stop, normal, State};
 		{ok, Peers} when is_list(Peers) ->
 			lists:map(fun({A,B,C,D,Port}) ->
@@ -267,8 +266,8 @@ handle_info(Info, State) ->
 %% @spec terminate(Reason, State) -> void()
 %% @end
 %%--------------------------------------------------------------------
-terminate(_Reason, _State) ->
-	?LOG_INFO([{event, ar_network_terminated}, {module, ?MODULE}]),
+terminate(Reason, _State) ->
+	?LOG_INFO([{event, ar_network_peer_terminated}, {reason, Reason}]),
 	ok.
 
 %%--------------------------------------------------------------------

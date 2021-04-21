@@ -28,7 +28,8 @@ test_txs_broadcast_order() ->
 	%% Limit the number of emitters so that
 	%% the order in which transactions are
 	%% received by the node can be asserted.
-	ar_tx_queue:set_max_emitters(1),
+
+	% deprecated method ar_tx_queue:set_max_emitters(1),
 	assert_post_tx_to_slave(TX1),
 	assert_post_tx_to_slave(TX2),
 	assert_post_tx_to_slave(TX3),

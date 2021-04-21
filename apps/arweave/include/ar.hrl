@@ -200,6 +200,9 @@
 -define(BASE_TX_PROPAGATION_DELAY, 30).
 -endif.
 
+%% keep this number of joined peers, but do not exceed this limit.
+-define(PEERS_JOINED_MAX, 20).
+
 %% A conservative assumption of the network speed used to
 %% estimate the transaction propagation delay. It does not include
 %% the base delay, the time the transaction spends in the priority
@@ -264,12 +267,6 @@
 %% Number of the mining processes to spawn. For SPoRA mining, the optimal number
 %% is the smallest one that saturates disk IO.
 -define(NUM_MINING_PROCESSES, 10).
-
-%% Number of transaction propagation processes to spawn.
-%% Each emitter picks a transaction from the queue and propagates it
-%% to the best peers, a configured number of peers at a time.
-%% Can be overriden by a command line argument.
--define(NUM_EMITTER_PROCESSES, 2).
 
 %% Target number of blocks per year.
 -define(BLOCK_PER_YEAR, (525600 / (?TARGET_TIME/60)) ).

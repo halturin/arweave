@@ -31,7 +31,6 @@ parse_config() ->
 		diff = 42,
 		mining_addr = ExpectedMiningAddr,
 		max_miners = 43,
-		max_emitters = 2,
 		max_propagation_peers = 8,
 		tx_propagation_parallelization = 4,
 		sync_jobs = 10,

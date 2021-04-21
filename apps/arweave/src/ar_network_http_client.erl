@@ -33,6 +33,7 @@
 
 %% @doc Retreive the current universal time as claimed by a foreign node.
 get_time(Peer, _) ->
+	?LOG_DEBUG("HTTP Client: get_time(). ~p", [Peer]),
 	case catch
 		ar_http:req(#{
 					method => get,
@@ -48,13 +49,15 @@ get_time(Peer, _) ->
 			%% The timestamp returned by the HTTP daemon is floored second precision. Thus the
 			%% upper bound is increased by 1.
 			{ok, {Time - RequestTime, Time + RequestTime + 1}};
-		_ ->
+		E ->
+			?LOG_DEBUG("HTTP Client error: get_time() ~p", [E]),
 			error
 	end.
 
 
 %% @doc Return a list of parsed peer IPs for a remote server.
 get_peers(Peer, _) ->
+	?LOG_DEBUG("HTTP Client: get_peers(). ~p", [Peer]),
 	case catch
 		ar_http:req(#{
 			method => get,
@@ -68,11 +71,13 @@ get_peers(Peer, _) ->
 			{ok, lists:map(fun ar_util:parse_peer/1, PeerArray)};
 		{ok, {{<<"404">>, _}, _, _, _, _}} ->
 			not_found;
-		_ ->
+		E ->
+			?LOG_DEBUG("HTTP Client error: get_peers() ~p", [E]),
 			error
 	end.
 
 get_info(Peer, _) ->
+	?LOG_DEBUG("HTTP Client: get_info(). ~p", [Peer]),
 	case catch
 		ar_http:req(#{
 			method => get,
@@ -87,16 +92,16 @@ get_info(Peer, _) ->
 			{ok, process_get_info_json(JSON)};
 		{ok, {{<<"404">>, _}, _, _, _, _}} ->
 			not_found;
-		A ->
-			?LOG_ERROR("DBG get_info ~p", [A]),
+		E ->
+			?LOG_DEBUG("HTTP Client error: get_info() ~p", [E]),
 			error
 	end.
 
 %% @doc Get a block hash list (by its hash) from the external peer.
 get_block_index(Peer, _) ->
-	?LOG_ERROR("DBG get_block_index enter ~p", [Peer]),
+	?LOG_DEBUG("HTTP Client: get_block_index(). ~p", [Peer]),
 	case catch
-		 ar_http:req(#{
+		ar_http:req(#{
 			method => get,
 			peer => Peer,
 			path => "/block_index",
@@ -108,13 +113,13 @@ get_block_index(Peer, _) ->
 			{ok, ar_serialize:json_struct_to_block_index(ar_serialize:dejsonify(Body))};
 		{ok, {{<<"404">>, _}, _, _, _, _}} ->
 			not_found;
-		A ->
-			?LOG_ERROR("DBG get_block_index ~p", [A]),
+		E ->
+			?LOG_DEBUG("HTTP Client error: get_block_index() ~p", [E]),
 			error
 	end.
 
 get_block(Peer, H) ->
-	?LOG_ERROR("DBG get_block enter ~p", [Peer]),
+	?LOG_DEBUG("HTTP Client: get_block(~p). ~p", [H, Peer]),
 	case catch
 		ar_http:req(#{
 			method => get,
@@ -130,13 +135,13 @@ get_block(Peer, H) ->
 			{ok, ar_serialize:json_struct_to_block(Body)};
 		{ok, {{<<"404">>, _}, _, _, _, _}} ->
 			not_found;
-		A ->
-			?LOG_ERROR("DBG get_block error ~p", [A]),
+		E ->
+			?LOG_DEBUG("HTTP Client error: get_block() ~p", [E]),
 			error
 	end.
 
 get_tx(Peer, TXID) ->
-	?LOG_ERROR("DBG get_tx ~p enter ~p", [TXID, Peer]),
+	?LOG_DEBUG("HTTP Client: get_tx(~p). ~p", [TXID, Peer]),
 	case catch
 		ar_http:req(#{
 			method => get,
@@ -168,7 +173,8 @@ get_tx(Peer, TXID) ->
 			not_found;
 		{ok, {{<<"410">>, _}, _, _, _, _}} ->
 			not_found;
-		_ ->
+		E ->
+			?LOG_DEBUG("HTTP Client error: get_tx() ~p", [E]),
 			error
 	end.
 
@@ -176,7 +182,7 @@ get_tx(Peer, TXID) ->
 
 %% @doc Get a bunch of wallets by the given root hash from external peers.
 get_wallet_list_chunk(Peer, {H, Cursor}) ->
-	?LOG_ERROR("DBG get_wallet_list_chunk ~p enter ~p", [{H, Cursor}, Peer]),
+	?LOG_DEBUG("HTTP Client: get_wallet_list_chunk(~p). ~p", [{H, Cursor}, Peer]),
 	BasePath = "/wallet_list/" ++ binary_to_list(ar_util:encode(H)),
 	Path =
 		case Cursor of
@@ -207,7 +213,8 @@ get_wallet_list_chunk(Peer, {H, Cursor}) ->
 					]),
 					unavailable
 			end;
-		_ ->
+		E ->
+			?LOG_DEBUG("HTTP Client error: get_wallet_list_chunk() ~p", [E]),
 			not_found
 	end;
 get_wallet_list_chunk(Peer, H) ->
@@ -215,7 +222,7 @@ get_wallet_list_chunk(Peer, H) ->
 
 %% @doc Get a wallet list by the given block hash from external peers.
 get_wallet_list(Peer, H) ->
-	?LOG_ERROR("DBG get_wallet_list ~p enter ~p", [H, Peer]),
+	?LOG_DEBUG("HTTP Client: get_wallet_list(~p). ~p", [H, Peer]),
 	case catch
 		ar_http:req(#{
 			method => get,
@@ -223,16 +230,18 @@ get_wallet_list(Peer, H) ->
 			path => "/block/hash/" ++ binary_to_list(ar_util:encode(H)) ++ "/wallet_list",
 			headers => p2p_headers()
 		})
-	 of
+	of
 		{ok, {{<<"200">>, _}, _, Body, _, _}} ->
 			{ok, ar_serialize:json_struct_to_wallet_list(Body)};
 		{ok, {{<<"404">>, _}, _, _, _, _}} ->
 			not_found;
-		_ ->
+		E ->
+			?LOG_DEBUG("HTTP Client error: get_wallet_list() ~p", [E]),
 			unavailable
 	end.
 
 get_sync_record(Peer, _) ->
+	?LOG_DEBUG("HTTP Client: get_sync_record(). ~p", [Peer]),
 	case catch
 		ar_http:req(#{
 			peer => Peer,
@@ -246,11 +255,13 @@ get_sync_record(Peer, _) ->
 	of
 		{ok, {{<<"200">>, _}, _, Body, _, _}} ->
 			ar_intervals:safe_from_etf(Body);
-		_ ->
+		E ->
+			?LOG_DEBUG("HTTP Client error: get_sync_record() ~p", [E]),
 			unavailable
 	end.
 
 get_chunk(Peer, Offset) ->
+	?LOG_DEBUG("HTTP Client: get_chunk(~p). ~p", [Offset, Peer]),
 	case catch
 		ar_http:req(#{
 			peer => Peer,
@@ -264,30 +275,46 @@ get_chunk(Peer, Offset) ->
 	of
 		{ok, {{<<"200">>, _}, _, Body, _, _}} ->
 			ar_serialize:json_map_to_chunk_proof(jiffy:decode(Body, [return_maps]));
-		_ ->
+		E ->
+			?LOG_DEBUG("HTTP Client error: get_chunk() ~p", [E]),
 			unavailable
 	end.
 
 post_tx(Peer, TX) ->
-	TXSize = byte_size(TX#tx.data),
+	?LOG_DEBUG("HTTP Client: post_tx(~p). ~p", [ar_util:encode(TX#tx.id), Peer]),
+	TX1 = cut_tx_data(TX, Peer),
+	TX1Size = byte_size(TX1#tx.data),
 	case catch
 		ar_http:req(#{
 			method => post,
 			peer => Peer,
 			path => "/tx",
 			headers => p2p_headers() ++ [{<<"arweave-tx-id">>, ar_util:encode(TX#tx.id)}],
-			body => ar_serialize:jsonify(ar_serialize:tx_to_json_struct(TX)),
+			body => ar_serialize:jsonify(ar_serialize:tx_to_json_struct(TX1)),
 			connect_timeout => 500,
-			timeout => max(3, min(60, TXSize * 8 div ?TX_PROPAGATION_BITS_PER_SECOND)) * 1000
+			timeout => max(3, min(60, TX1Size * 8 div ?TX_PROPAGATION_BITS_PER_SECOND)) * 1000
 	})
 	of
 		{ok, _} ->
 			{ok, sent};
-		_ ->
+		E ->
+			?LOG_DEBUG("HTTP Client error: post_tx() ~p", [E]),
 			error
 	end.
+% to speed up the TX propagation, cut the data field (will be synced
+% via ar_data_sync)
+cut_tx_data(TX, _Peer) when TX#tx.format == 1 ->
+	TX;
+cut_tx_data(TX, Peer) when TX#tx.format == 2->
+	% keep it only for the trusted peer just for the emergency case
+	{ok, Config} = application:get_env(arweave, config),
+	case lists:member(Peer, Config#config.peers) of
+		true ->  TX;
+		false -> TX#tx{ data = <<>> }
+	end.
 
-post_block(Peer, {Block, BDS}) ->
+post_block(Peer, Block) ->
+	?LOG_DEBUG("HTTP Client: post_block(~p). ~p", [Block#block.height, Peer]),
 	{BlockProps} = ar_serialize:block_to_json_struct(Block),
 	BlockShadowProps =
 		case Block#block.height >= ar_fork:height_2_4() of
@@ -310,8 +337,7 @@ post_block(Peer, {Block, BDS}) ->
 		{<<"new_block">>, {BlockShadowProps}},
 		%% Add the P2P port field to be backwards compatible with nodes
 		%% running the old version of the P2P port feature.
-		{<<"port">>, ?DEFAULT_HTTP_IFACE_PORT},
-		{<<"block_data_segment">>, ar_util:encode(BDS)}
+		{<<"port">>, ?DEFAULT_HTTP_IFACE_PORT}
 	],
 	case catch
 		ar_http:req(#{
@@ -326,7 +352,8 @@ post_block(Peer, {Block, BDS}) ->
 	of
 		{ok, _} ->
 			{ok, sent};
-		_ ->
+		E ->
+			?LOG_DEBUG("HTTP Client error: post_block() ~p", [E]),
 			error
 	end.
 

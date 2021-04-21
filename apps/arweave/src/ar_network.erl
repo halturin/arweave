@@ -46,8 +46,6 @@
 %% Pid - 'undefined' if peer is offline (candidate or went offline)
 %% Since - timestamp of the online/offline statement change
 
-%% keep this number of joined peers, but do not exceed this limit.
--define(PEERS_JOINED_MAX, 20).
 %% do not bother the peer during this time if its went offline
 -define(PEER_SLEEP_TIME, 60). % in minutes
 %% we should rotate the peers
@@ -72,13 +70,13 @@
 %% Sends Block/TX to the joined peers.
 %% @end
 %%--------------------------------------------------------------------
-broadcast(block, {Block, BDS}) ->
-	broadcast(block, {Block, BDS}, {#{}, ?PEERS_JOINED_MAX});
+broadcast(block, Block) ->
+	broadcast(block, Block, {#{}, ?PEERS_JOINED_MAX});
 broadcast(tx, TX) ->
 	broadcast(tx, TX, {#{}, ?PEERS_JOINED_MAX}).
 
-broadcast(block, {Block, BDS}, {ExcludePeers, Max}) ->
-	request({broadcast, ExcludePeers, Max}, {post_block, {Block, BDS}}, 60000);
+broadcast(block, Block, {ExcludePeers, Max}) ->
+	request({broadcast, ExcludePeers, Max}, {post_block, Block}, 60000);
 broadcast(tx, TX, {ExcludePeers, Max}) ->
 	request({broadcast, ExcludePeers, Max}, {post_tx, TX}, 60000).
 
@@ -133,7 +131,7 @@ get_block(B) ->
 		unavailable ->
 			unavailable;
 		Block ->
-			?LOG_ERROR("DBG got shadow block ~p. Get txs ~p", [Block#block.height, length(Block#block.txs)]),
+			?LOG_DEBUG("got shadow block ~p. Get txs ~p", [Block#block.height, length(Block#block.txs)]),
 			case get_txs(Block#block.txs) of
 				unavailable ->
 					unavailable;
@@ -243,7 +241,7 @@ handle_call(Request, _From, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_cast(join, State) ->
-	?LOG_ERROR("0000000000000000 joining..."),
+	?LOG_DEBUG("Network joining..."),
 	{ok, Config} = application:get_env(arweave, config),
 	case peers_joined() of
 		Peers when length(Peers) < length(Config#config.peers) ->
@@ -269,7 +267,7 @@ handle_cast(_Msg, State)  when State#state.ready == false ->
 	% do nothing
 	{noreply, State};
 handle_cast(peering, State) ->
-	?LOG_ERROR("0000000000000000 peering..."),
+	?LOG_DEBUG("Network peering..."),
 	case peers_joined() of
 		[] ->
 			gen_server:cast(?MODULE, join),
@@ -318,7 +316,7 @@ handle_cast(peering, State) ->
 			{ok, T} = timer:send_after(10000, {'$gen_cast', peering}),
 			{noreply, State#state{peering_timer = T}};
 		Peers ->
-			?LOG_ERROR("0000000000000000 do nothing"),
+			?LOG_DEBUG("Network peering. Do nothing"),
 			prometheus_gauge:set(arweave_peer_count, length(Peers)),
 			{ok, T} = timer:send_after(10000, {'$gen_cast', peering}),
 			{noreply, State#state{peering_timer = T}}
@@ -341,7 +339,7 @@ handle_info({event, node, ready}, State) when is_reference(State#state.peering_t
 	% already started self casting with 'peering' message.
 	{noreply, State};
 handle_info({event, node, ready}, State) ->
-	?LOG_ERROR("0000000000000000 node is ready"),
+	?LOG_DEBUG("Network. Start peering..."),
 	gen_server:cast(?MODULE, peering),
 	%% Now we can serve incoming requests. Start the HTTP server.
 	ok = ar_http_iface_server:start(),
@@ -361,13 +359,14 @@ handle_info({event, peer, {joined, PeerID, IP, Port}}, State) ->
 			?LOG_ERROR("internal error. got event joined from unknown peer",[{IP, Port, PeerID}]),
 			{noreply, State};
 		[{{IP,Port}, Pid, undefined, _}] when length(Joined) == 0 ->
-			?LOG_ERROR("0000000000000000 peer FIRST joined "),
+			?LOG_DEBUG("Network. First peer joined"),
+			?LOG_DEBUG("Network. First peer ~p:~p joined (~p)", [IP, Port, length(Joined), Pid]),
 			ar_events:send(network, connected),
 			T = os:system_time(second),
 			ets:insert(?MODULE, {{IP,Port}, Pid, T, PeerID}),
 			{noreply, State};
 		[{{IP,Port}, Pid, undefined, _}] ->
-			?LOG_ERROR("0000000000000000 peer N ~p joined ", [length(Joined)]),
+			?LOG_DEBUG("Network. Peer ~p:~p N ~p joined (~p)", [IP, Port, length(Joined), Pid]),
 			T = os:system_time(second),
 			ets:insert(?MODULE, {{IP,Port}, Pid, T, PeerID}),
 			{noreply, State}
@@ -421,7 +420,7 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 peering(IP, Port, Options)->
-	?LOG_ERROR("DBG peering ~p connecting...", [{IP,Port}]),
+	?LOG_DEBUG("Network. Peering with ~p. Connecting...", [{IP,Port}]),
 	T = os:system_time(second),
 	SleepTime = proplists:get_value(sleep_time, Options, ?PEER_SLEEP_TIME),
 	case ets:lookup(?MODULE, {IP,Port}) of
@@ -486,7 +485,7 @@ peer_went_offline(Pid, Reason) ->
 			ets:insert(?MODULE, {{IP,Port}, undefined, T, PeerID});
 		[[{IP,Port}, Since, PeerID]] ->
 			LifeSpan = trunc((T - Since)/60),
-			?LOG_INFO("Peer ~p:~p went offline (~p). Had peering during ~p minutes", [IP,Port, Reason, LifeSpan]),
+			?LOG_DEBUG("Network. Peer ~p:~p went offline (~p). Had peering during ~p minutes", [IP,Port, Reason, LifeSpan]),
 			ar_events:send(peer, {left, PeerID}),
 			ets:insert(?MODULE, {{IP,Port}, undefined, T, undefined})
 	end.
@@ -556,16 +555,16 @@ do_sequential_spawn(Origin, {_Request, Args}, _Timeout, []) ->
 	Origin ! {final, {nopeers, Args}};
 do_sequential_spawn(Origin, {Request, Args}, Timeout, [Peer|Peers]) ->
 	{_IP, _Port, Pid, _PeerID} = Peer,
-	?LOG_ERROR("DBG do_sequential_spawn ~p: ~p", [Peer, {Request, Args}]),
+	?LOG_DEBUG("do_sequential_spawn ~p: ~p", [Peer, {Request, Args}]),
 	case catch gen_server:call(Pid, {request, Request, Args}, Timeout) of
 		{result, Result} ->
 			Origin ! {final, Result};
 		not_found ->
-			?LOG_ERROR("DBG do_sequential_spawn not_found (~p)", [{Pid, Request, Args}]),
+			?LOG_DEBUG("do_sequential_spawn not_found (~p)", [{Pid, Request, Args}]),
 			do_sequential_spawn(Origin, {Request, Args}, Timeout, Peers);
 		E ->
 			% should we penalty this peer?
-			?LOG_ERROR("do_sequential_spawn (~p) ~p", [{Pid, Request, Args}, E]),
+			?LOG_DEBUG("do_sequential_spawn (~p) ~p", [{Pid, Request, Args}, E]),
 			do_sequential_spawn(Origin, {Request, Args}, Timeout, Peers)
 	end.
 
@@ -606,7 +605,7 @@ do_broadcast_spawn(Origin, {Request, Args}, {S,N,Results}, Timeout, [Peer|Peers]
 				{result, Result} ->
 					Receiver ! Result;
 				E ->
-					?LOG_ERROR("DBG do_broadcast_spawn (~p) ~p", [{Pid, Request, Args}, E]),
+					?LOG_DEBUG("do_broadcast_spawn (~p) ~p", [{Pid, Request, Args}, E]),
 					Receiver ! error
 			end
 	end),
@@ -652,12 +651,12 @@ do_parallel_spawn(Origin, {Request, [A|Args]}, {N, Results}, Timeout, [Peer|Peer
 	spawn_link(fun() ->
 			case catch gen_server:call(Pid, {request, Request, A}, Timeout) of
 				{result, Result} ->
-					?LOG_ERROR("DBG do_parallel_spawn OK ~p", [{Pid, Request, A}]),
+					?LOG_DEBUG("do_parallel_spawn OK ~p", [{Pid, Request, A}]),
 					Receiver ! {result, A, Result, Peer};
 				not_found ->
 					Receiver ! {not_found, A, Peer};
 				E ->
-					?LOG_ERROR("DBG do_parallel_spawn (~p) ~p", [{Pid, Request, A}, E]),
+					?LOG_DEBUG("do_parallel_spawn (~p) ~p", [{Pid, Request, A}, E]),
 					Receiver ! {error, A}
 			end
 	end),

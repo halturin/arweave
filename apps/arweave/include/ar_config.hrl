@@ -50,7 +50,6 @@
 	diff = ?DEFAULT_DIFF,
 	mining_addr = false,
 	max_miners = ?NUM_MINING_PROCESSES,
-	max_emitters = ?NUM_EMITTER_PROCESSES,
 	tx_propagation_parallelization = ?TX_PROPAGATION_PARALLELIZATION,
 	sync_jobs = ?DEFAULT_SYNC_JOBS,
 	new_key = false,
@@ -79,7 +78,8 @@
 	max_disk_pool_buffer_mb = ?DEFAULT_MAX_DISK_POOL_BUFFER_MB,
 	max_disk_pool_data_root_buffer_mb = ?DEFAULT_MAX_DISK_POOL_DATA_ROOT_BUFFER_MB,
 	randomx_bulk_hashing_iterations = 12,
-	wildfire = {#{}, #{}}
+	wildfire = {#{}, #{}},
+	debug = false
 }).
 
 -endif.

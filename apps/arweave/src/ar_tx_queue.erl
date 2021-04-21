@@ -3,136 +3,186 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/0, stop/0]).
--export([set_max_emitters/1, set_max_header_size/1, set_max_data_size/1, set_pause/1]).
--export([add_tx/1, show_queue/0]).
--export([utility/1]).
--export([drop_tx/1]).
-
-%% gen_server callbacks
 -export([
-	init/1, handle_call/3, handle_cast/2,
-	terminate/2, code_change/3, format_status/2
+	start_link/0
 ]).
+
+-export([
+	init/1,
+	handle_call/3,
+	handle_cast/2,
+	handle_info/2,
+	terminate/2,
+	code_change/3
+]).
+
+-export([set_pause/1, show_queue/0, drop_tx/1]).
+
 
 -include_lib("arweave/include/ar.hrl").
 -include_lib("arweave/include/ar_config.hrl").
 
+%% Internal state definition.
 -record(state, {
-	tx_queue,
-	emitters_running,
-	max_emitters,
-	max_header_size,
-	max_data_size,
-	header_size,
-	data_size,
-	paused,
-	emit_map
+	tx_queue = gb_sets:new(),
+	max_header_size = ?TX_QUEUE_HEADER_SIZE_LIMIT,
+	max_data_size = ?TX_QUEUE_DATA_SIZE_LIMIT,
+	header_size = 0,
+	data_size = 0,
+	paused = false,
+	process_timer
 }).
 
--define(EMITTER_START_WAIT, 150).
--define(EMITTER_INTER_WAIT, 5).
 
 %%%===================================================================
-%%% Public interface.
+%%% API
 %%%===================================================================
-
-start_link() ->
-	Resp =
-		case gen_server:start_link({local, ?MODULE}, ?MODULE, [], []) of
-			{ok, _Pid} ->
-				ok;
-			{error, {already_started, _Pid}} ->
-				ok;
-			Error ->
-				?LOG_ERROR({?MODULE, error_on_start_link, Error}),
-				error
-		end,
-	case Resp of
-		ok -> start_emitters();
-		_  -> pass
-	end.
-
-start_emitters() ->
-	gen_server:call(?MODULE, start_emitters).
-
-stop() ->
-	gen_server:stop(?MODULE).
-
-set_pause(PauseOrNot) ->
-	gen_server:call(?MODULE, {set_pause, PauseOrNot}).
-
-set_max_header_size(Bytes) ->
-	gen_server:call(?MODULE, {set_max_header_size, Bytes}).
-
-set_max_data_size(Bytes) ->
-	gen_server:call(?MODULE, {set_max_data_size, Bytes}).
-
-set_max_emitters(N) ->
-	gen_server:call(?MODULE, {set_max_emitters, N}).
-
-add_tx(TX) ->
-	gen_server:cast(?MODULE, {add_tx, TX}).
+set_pause(Paused) ->
+	gen_server:call(?MODULE, {set_pause, Paused}).
 
 show_queue() ->
 	gen_server:call(?MODULE, show_queue).
 
 drop_tx(TX) ->
-	gen_server:cast(?MODULE, {drop_tx, TX}).
+	gen_server:call(?MODULE, {drop_tx, TX}).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Starts the server
+%%
+%% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
+%% @end
+%%--------------------------------------------------------------------
+start_link() ->
+	gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 %%%===================================================================
-%%% Generic server callbacks.
+%%% gen_server callbacks
 %%%===================================================================
 
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Initializes the server
+%%
+%% @spec init(Args) -> {ok, State} |
+%%					   {ok, State, Timeout} |
+%%					   ignore |
+%%					   {stop, Reason}
+%% @end
+%%--------------------------------------------------------------------
 init([]) ->
-	MaxEmitters =
-		case ar_meta_db:get(max_emitters) of
-			not_found -> ?NUM_EMITTER_PROCESSES;
-			X -> X
-		end,
-	{ok, #state{
-		tx_queue = gb_sets:new(),
-		emitters_running = 0,
-		max_emitters = MaxEmitters,
-		max_header_size = ?TX_QUEUE_HEADER_SIZE_LIMIT,
-		max_data_size = ?TX_QUEUE_DATA_SIZE_LIMIT,
-		header_size = 0,
-		data_size = 0,
-		paused = false,
-		emit_map = #{}
-	}}.
+	{ok, #state{}}.
 
-handle_call({set_pause, PauseOrNot}, _From, State) ->
-	{reply, ok, State#state{ paused = PauseOrNot }};
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Handling call messages
+%%
+%% @spec handle_call(Request, From, State) ->
+%%									 {reply, Reply, State} |
+%%									 {reply, Reply, State, Timeout} |
+%%									 {noreply, State} |
+%%									 {noreply, State, Timeout} |
+%%									 {stop, Reason, Reply, State} |
+%%									 {stop, Reason, State}
+%% @end
+%%--------------------------------------------------------------------
+handle_call({set_pause, true}, _From, State) ->
+	timer:cancel(State#state.process_timer),
+	{reply, ok, State#state{ paused = true, process_timer = undefined}};
 
-handle_call({set_max_emitters, N}, _From, State) ->
-	{reply, ok, State#state{ max_emitters = N }};
-
-handle_call({set_max_header_size, Bytes}, _From, State) ->
-	{reply, ok, State#state{ max_header_size = Bytes }};
-
-handle_call({set_max_data_size, Bytes}, _From, State) ->
-	{reply, ok, State#state{ max_data_size = Bytes }};
-
-handle_call(show_queue, _From, State = #state{ tx_queue = Q }) ->
-	Reply = show_queue(Q),
+handle_call(show_queue, _From, State) ->
+	Reply = show_queue(State#state.tx_queue),
 	{reply, Reply, State};
 
-handle_call(start_emitters, _From, State) ->
-	#state{ max_emitters = MaxEmitters, emitters_running = EmittersRunning } = State,
-	lists:foreach(
-		fun(N) ->
-			Wait = N * ?EMITTER_START_WAIT,
-			timer:apply_after(Wait, gen_server, cast, [?MODULE, emitter_go])
-		end,
-		lists:seq(1, max(MaxEmitters - EmittersRunning, 0))
-	),
-	{reply, ok, State#state{ emitters_running = MaxEmitters, paused = false }};
+handle_call({drop_tx, TX}, _From, State) ->
+	#state{
+		tx_queue = Q,
+		header_size = HeaderSize,
+		data_size = DataSize
+	} = State,
+	{TXHeaderSize, TXDataSize} = tx_queue_size(TX),
+	U = utility(TX),
+	Item = {U, {TX, {TXHeaderSize, TXDataSize}}},
+	case gb_sets:is_element(Item, Q) of
+		true ->
+			{reply, ok, State#state{
+				tx_queue = gb_sets:del_element(Item, Q),
+				header_size = HeaderSize - TXHeaderSize,
+				data_size = DataSize - TXDataSize
+			}};
+		false ->
+			{reply, not_found, State}
+	end;
 
-handle_call(_Request, _From, State) ->
+handle_call(Request, _From, State) ->
+	?LOG_ERROR("unhandled call: ~p", [Request]),
+	{reply, ok, State}.
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Handling cast messages
+%%
+%% @spec handle_cast(Msg, State) -> {noreply, State} |
+%%									{noreply, State, Timeout} |
+%%									{stop, Reason, State}
+%% @end
+%%--------------------------------------------------------------------
+handle_cast(_Msg, State) when State#state.paused ->
+	{noreply, State};
+
+handle_cast(_Msg, State) when State#state.tx_queue == {0, nil} ->
+	?LOG_DEBUG("TX Queue is empty. Waiting..."),
+	{ok, T} = timer:send_after(5000, {'$gen_cast', process_queue}),
+	{noreply, State#state{process_timer = T}};
+
+handle_cast(process_queue, State) ->
+	?LOG_DEBUG("TX Queue process..."),
+	#state{
+		tx_queue = Q,
+		header_size = HeaderSize,
+		data_size = DataSize
+	} = State,
+	{{_, {TX, {TXHeaderSize, TXDataSize}, FromPeerID}}, NewQ} = gb_sets:take_largest(Q),
+	ExcludePeers = #{FromPeerID => true},
+	?LOG_DEBUG("TX Queue broadcast TXID ~p (exclude ~p)", [TX, FromPeerID]),
+	BroadcastingStartedAt = erlang:timerstamp(),
+	L = ar_network:broadcast(tx, TX, {ExcludePeers, ?PEERS_JOINED_MAX}),
+	?LOG_ERROR("LLLLLLLL ~p", [L]),
+	BroadcastingTimeUs = timer:now_diff(erlang:timestamp(), BroadcastingStartedAt),
+	record_propagation_rate(tx_propagated_size(TX), BroadcastingTimeUs),
+	record_queue_size(gb_sets:size(NewQ)),
+	gen_server:cast(?MODULE, process_queue),
+	% compute the delay we should wait before the sending this TX to the mining pool
+	Delay = ar_node_utils:calculate_delay(tx_propagated_size(TX)),
+	timer:send_after(Delay, {'$gen_cast', {send_to_mining_pool, TX}}),
+	NewState = State#state{
+		tx_queue = NewQ,
+		header_size = HeaderSize - TXHeaderSize,
+		data_size = DataSize - TXDataSize
+	},
+	{noreply, NewState};
+
+handle_cast({send_to_mining_pool, TX}, State) ->
+	ar_events:send(tx, {mine, TX}),
+	{noreply, State};
+
+handle_cast(Msg, State) ->
+	?LOG_ERROR([{event, unhandled_cast}, {message, Msg}]),
 	{noreply, State}.
 
-handle_cast({add_tx, TX}, State) ->
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Handling all non call/cast messages
+%%
+%% @spec handle_info(Info, State) -> {noreply, State} |
+%%									 {noreply, State, Timeout} |
+%%									 {stop, Reason, State}
+%% @end
+%%--------------------------------------------------------------------
+handle_info({event, tx, {new, TX, FromPeerID}}, State) ->
 	#state{
 		tx_queue = Q,
 		max_header_size = MaxHeaderSize,
@@ -140,11 +190,12 @@ handle_cast({add_tx, TX}, State) ->
 		header_size = HeaderSize,
 		data_size = DataSize
 	} = State,
+	?LOG_DEBUG("TX Queue new tx received ~p from ~p", [TX#tx.id, FromPeerID]),
 	{TXHeaderSize, TXDataSize} = tx_queue_size(TX),
 	U = utility(TX),
 	{NewQ, {NewHeaderSize, NewDataSize}, DroppedTXs} =
 		maybe_drop(
-			gb_sets:add_element({U, {TX, {TXHeaderSize, TXDataSize}}}, Q),
+			gb_sets:add_element({U, {TX, {TXHeaderSize, TXDataSize}, FromPeerID}}, Q),
 			{HeaderSize + TXHeaderSize, DataSize + TXDataSize},
 			{MaxHeaderSize, MaxDataSize}
 		),
@@ -172,7 +223,7 @@ handle_cast({add_tx, TX}, State) ->
 				{event, drop_txs_from_queue},
 				{dropped_txs, DroppedIDs}
 			]),
-			ar_bridge:drop_waiting_txs(DroppedTXs)
+			ar_events:send(tx, {drop, DroppedTXs})
 	end,
 	NewState = State#state{
 		tx_queue = NewQ,
@@ -181,148 +232,47 @@ handle_cast({add_tx, TX}, State) ->
 	},
 	{noreply, NewState};
 
-handle_cast({drop_tx, TX}, State) ->
-	#state{
-		tx_queue = Q,
-		header_size = HeaderSize,
-		data_size = DataSize
-	} = State,
-	{TXHeaderSize, TXDataSize} = tx_queue_size(TX),
-	U = utility(TX),
-	Item = {U, {TX, {TXHeaderSize, TXDataSize}}},
-	case gb_sets:is_element(Item, Q) of
-		true ->
-			{noreply, State#state{
-				tx_queue = gb_sets:del_element(Item, Q),
-				header_size = HeaderSize - TXHeaderSize,
-				data_size = DataSize - TXDataSize
-			}};
-		false ->
-			{noreply, State}
-	end;
-
-handle_cast(emitter_go, State = #state{ paused = true }) ->
-	timer:apply_after(?EMITTER_START_WAIT, gen_server, cast, [?MODULE, emitter_go]),
-	{noreply, State};
-handle_cast(emitter_go, State = #state{ emitters_running = EmittersRunning, max_emitters = MaxEmitters }) when EmittersRunning > MaxEmitters ->
-	{noreply, State#state { emitters_running = EmittersRunning - 1}};
-handle_cast(emitter_go, State) ->
-	#state{
-		tx_queue = Q,
-		header_size = HeaderSize,
-		data_size = DataSize,
-		emit_map = EmitMap
-	} = State,
-	NewState =
-		case gb_sets:is_empty(Q) of
-			true ->
-				timer:apply_after(?EMITTER_START_WAIT, gen_server, cast, [?MODULE, emitter_go]),
-				State;
-			false ->
-				{{_, {TX, {TXHeaderSize, TXDataSize}}}, NewQ} = gb_sets:take_largest(Q),
-				{Peers, TrustedPeers} = get_peers(),
-				case Peers of
-					[] ->
-						gen_server:cast(?MODULE, {emitter_finished, TX}),
-						State#state{
-							tx_queue = NewQ,
-							header_size = HeaderSize - TXHeaderSize,
-							data_size = DataSize - TXDataSize
-						};
-					_ ->
-						%% Send transactions to the "max_propagation_peers" best peers,
-						%% tx_propagation_parallelization peers at a time. The resulting
-						%% maximum for outbound connections is
-						%% tx_propagation_parallelization * num_emitters.
-						lists:foreach(
-							fun(_) ->
-								gen_server:cast(?MODULE, {emit_tx_to_peer, TX})
-							end,
-							lists:seq(1, ar_meta_db:get(tx_propagation_parallelization))
-						),
-						TXID = TX#tx.id,
-						NewEmitMap = EmitMap#{
-							TXID => #{
-								peers => Peers,
-								started_at => erlang:timestamp(),
-								trusted_peers => TrustedPeers
-							}},
-						State#state{
-							tx_queue = NewQ,
-							header_size = HeaderSize - TXHeaderSize,
-							data_size = DataSize - TXDataSize,
-							emit_map = NewEmitMap
-						}
-				end
-		end,
-	{noreply, NewState};
-
-handle_cast({emit_tx_to_peer, TX}, State = #state{ emit_map = EmitMap }) ->
-	#tx{ id = TXID } = TX,
-	case EmitMap of
-		#{ TXID := #{ peers := [] } } ->
-			{noreply, State};
-		#{ TXID := TXIDMap = #{ peers := [Peer | Peers], trusted_peers := TrustedPeers } } ->
-			spawn(
-				fun() ->
-					PropagatedTX = tx_to_propagated_tx(TX, Peer, TrustedPeers),
-					Reply = ar_http_iface_client:send_new_tx(Peer, PropagatedTX),
-					gen_server:cast(?MODULE, {emitted_tx_to_peer, {Reply, TX}})
-				end
-			),
-			{noreply, State#state{ emit_map = EmitMap#{ TXID => TXIDMap#{ peers => Peers } } }};
-		_ ->
-			{noreply, State}
-	end;
-
-handle_cast({emitted_tx_to_peer, {Reply, TX}}, State = #state{ emit_map = EmitMap, tx_queue = Q }) ->
-	TXID = TX#tx.id,
-	case EmitMap of
-		#{ TXID := #{ peers := [], started_at := StartedAt } } ->
-			PropagationTimeUs = timer:now_diff(erlang:timestamp(), StartedAt),
-			record_propagation_status(Reply),
-			record_propagation_rate(tx_propagated_size(TX), PropagationTimeUs),
-			record_queue_size(gb_sets:size(Q)),
-			gen_server:cast(?MODULE, {emitter_finished, TX}),
-			{noreply, State#state{ emit_map = maps:remove(TXID, EmitMap) }};
-		_ ->
-			gen_server:cast(?MODULE, {emit_tx_to_peer, TX}),
-			{noreply, State}
-	end;
-
-handle_cast({emitter_finished, TX}, State) ->
-	timer:apply_after(
-		ar_node_utils:calculate_delay(tx_propagated_size(TX)),
-		ar_bridge,
-		move_tx_to_mining_pool,
-		[TX]
-	),
-	timer:apply_after(?EMITTER_INTER_WAIT, gen_server, cast, [?MODULE, emitter_go]),
-	{noreply, State};
-
-handle_cast(_Request, State) ->
+handle_info(Info, State) ->
+	?LOG_ERROR([{event, unhandled_info}, {info, Info}]),
 	{noreply, State}.
 
-terminate(_Reason, _State) ->
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% This function is called by a gen_server when it is about to
+%% terminate. It should be the opposite of Module:init/1 and do any
+%% necessary cleaning up. When it returns, the gen_server terminates
+%% with Reason. The return value is ignored.
+%%
+%% @spec terminate(Reason, State) -> void()
+%% @end
+%%--------------------------------------------------------------------
+terminate(Reason, _State) ->
+	?LOG_INFO([{event, ar_tx_queue_terminated}, {reason, Reason}]),
 	ok.
 
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Convert process state when code is changed
+%%
+%% @spec code_change(OldVsn, State, Extra) -> {ok, NewState}
+%% @end
+%%--------------------------------------------------------------------
 code_change(_OldVsn, State, _Extra) ->
 	{ok, State}.
 
-format_status(_Opt, Status) ->
-	Status.
 
 %%%===================================================================
-%%% Private functions.
+%%% Internal functions
 %%%===================================================================
-
 maybe_drop(Q, Size, MaxSize) ->
 	maybe_drop(Q, Size, MaxSize, []).
 
 maybe_drop(Q, {HeaderSize, DataSize} = Size, {MaxHeaderSize, MaxDataSize} = MaxSize, DroppedTXs) ->
 	case HeaderSize > MaxHeaderSize orelse DataSize > MaxDataSize of
 		true ->
-			{{_, {TX, {DroppedHeaderSize, DroppedDataSize}}}, NewQ} = gb_sets:take_smallest(Q),
+			{{_, {TX, {DroppedHeaderSize, DroppedDataSize}, _FromPeerID}}, NewQ} = gb_sets:take_smallest(Q),
 			maybe_drop(
 				NewQ,
 				{HeaderSize - DroppedHeaderSize, DataSize - DroppedDataSize},
@@ -333,26 +283,9 @@ maybe_drop(Q, {HeaderSize, DataSize} = Size, {MaxHeaderSize, MaxDataSize} = MaxS
 			{Q, Size, lists:filter(fun(TX) -> TX /= none end, DroppedTXs)}
 	end.
 
-get_peers() ->
-	Peers =
-		lists:sublist(ar_bridge:get_remote_peers(), ar_meta_db:get(max_propagation_peers)),
-	{ok, Config} = application:get_env(arweave, config),
-	TrustedPeers = Config#config.peers,
-	{join_peers(Peers, TrustedPeers), TrustedPeers}.
-
-join_peers(Peers, [TrustedPeer | TrustedPeers]) ->
-	case lists:member(TrustedPeer, Peers) of
-		true ->
-			join_peers(Peers, TrustedPeers);
-		false ->
-			join_peers([TrustedPeer | Peers], TrustedPeers)
-	end;
-join_peers(Peers, []) ->
-	Peers.
-
 show_queue(Q) ->
 	gb_sets:fold(
-		fun({_, {TX, _}}, Acc) ->
+		fun({_, {TX, _}, _}, Acc) ->
 			[{ar_util:encode(TX#tx.id), TX#tx.reward, TX#tx.data_size} | Acc]
 		end,
 		[],
@@ -370,25 +303,10 @@ tx_propagated_size(#tx{ format = 2 }) ->
 tx_propagated_size(#tx{ format = 1, data = Data }) ->
 	?TX_SIZE_BASE + byte_size(Data).
 
-tx_to_propagated_tx(#tx{ format = 1 } = TX, _Peer, _TrustedPeers) ->
-	TX;
-tx_to_propagated_tx(#tx{ format = 2 } = TX, Peer, TrustedPeers) ->
-	case lists:member(Peer, TrustedPeers) of
-		true ->
-			TX;
-		false ->
-			TX#tx{ data = <<>> }
-	end.
-
 tx_queue_size(#tx{ format = 1 } = TX) ->
 	{tx_propagated_size(TX), 0};
 tx_queue_size(#tx{ format = 2, data = Data }) ->
 	{?TX_SIZE_BASE, byte_size(Data)}.
-
-record_propagation_status(not_sent) ->
-	ok;
-record_propagation_status(Data) ->
-	prometheus_counter:inc(propagated_transactions_total, [ar_metrics:get_status_class(Data)]).
 
 record_propagation_rate(PropagatedSize, PropagationTimeUs) ->
 	BitsPerSecond = PropagatedSize * 1000000 / PropagationTimeUs * 8,

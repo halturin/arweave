@@ -60,7 +60,6 @@ init([]) ->
 		?CHILD(ar_network_handler_sup, supervisor, [?DEFAULT_COMMON_HANDLERS]),
 		?CHILD(ar_watchdog, worker),
 		?CHILD(ar_tx_blacklist, worker),
-		?CHILD(ar_bridge, worker),
 		?CHILD(ar_header_sync, worker),
 		?CHILD(ar_data_sync, worker),
 		?CHILD(ar_node_worker, worker),

@@ -1146,7 +1146,7 @@ handle_post_tx_accepted(Req, PeerIP, TX) ->
 	%% IP-based throttling, to avoid connectivity issues at the times
 	%% of excessive transaction volumes.
 	ar_blacklist_middleware:decrement_ip_addr(PeerIP, Req),
-	ar_bridge:add_tx(TX),
+	ar_events:send(tx, {new, TX, PeerIP}),
 	case TX#tx.format of
 		2 ->
 			ar_data_sync:add_data_root_to_disk_pool(TX#tx.data_root, TX#tx.data_size, TX#tx.id);
@@ -1534,18 +1534,13 @@ post_block(check_pow, {BShadow, OrigPeer, BDS, PrevB}, Req, ReceiveTimestamp) ->
 			ar_blacklist_middleware:ban_peer(OrigPeer, ?BAD_POW_BAN_TIME),
 			{400, #{}, <<"Invalid Block Proof of Work">>, Req}
 	end;
-post_block(post_block, {BShadow, OrigPeer, BDS}, Req, ReceiveTimestamp) ->
+post_block(post_block, {BShadow, OrigPeer, _BDS}, Req, ReceiveTimestamp) ->
 	record_block_pre_validation_time(ReceiveTimestamp),
 	?LOG_INFO([
 		{event, ar_http_iface_handler_accepted_block},
 		{indep_hash, ar_util:encode(BShadow#block.indep_hash)}
 	]),
-	ar_bridge:add_block(
-		OrigPeer,
-		BShadow,
-		BDS,
-		ReceiveTimestamp
-	),
+	ar_events:send(block, {new, BShadow, OrigPeer}),
 	{200, #{}, <<"OK">>, Req}.
 
 compute_hash(B, Height) ->

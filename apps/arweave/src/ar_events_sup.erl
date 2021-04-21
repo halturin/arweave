@@ -35,5 +35,9 @@ init([]) ->
 		% events: joined/left/request (income requests)/response (for our requests)
 		?CHILD(ar_events, peer, worker),
 		% events: ban peer, set access restriction, etc...
-		?CHILD(ar_events, access, worker)
+		?CHILD(ar_events, access, worker),
+		% events: new, mine, drop
+		?CHILD(ar_events, tx, worker),
+		% events: new
+		?CHILD(ar_events, block, worker)
 	]}}.

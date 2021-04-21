@@ -44,6 +44,7 @@ handle_cast(poll_block, State) ->
 		last_seen_height := LastSeenHeight,
 		interval := Interval
 	} = State,
+	?LOG_DEBUG("Polling. Checking current height ..."),
 	{NewLastSeenHeight, NeedPoll} =
 		case ar_node:get_height() of
 			-1 ->
@@ -61,6 +62,7 @@ handle_cast(poll_block, State) ->
 	NewState =
 		case NeedPoll of
 			true ->
+				?LOG_DEBUG("Polling block ~p ...", [NewLastSeenHeight + 1]),
 				case fetch_block(NewLastSeenHeight + 1) of
 					ok ->
 						%% Check if we have missed more than one block.
@@ -143,7 +145,7 @@ submit_fetched_blocks([B | Blocks], ReceiveTimestamp) ->
 		{block, ar_util:encode(B#block.indep_hash)},
 		{height, B#block.height}
 	]),
-	ar_node_worker ! {new_block, self(), B#block.height, B, no_data_segment, ReceiveTimestamp},
+	ar_events:send(block, {new, B, poller}),
 	submit_fetched_blocks(Blocks, ReceiveTimestamp);
 submit_fetched_blocks([], _ReceiveTimestamp) ->
 	ok.
