@@ -469,18 +469,26 @@ handle(<<"POST">>, [<<"unsigned_tx">>], Req, Pid) ->
 			{Status, Headers, Body, Req}
 	end;
 
-%% @doc Return the list of peers held by the node.
+%% @doc Return the list of peers held by the node
 %% GET request to endpoint /peers
 handle(<<"GET">>, [<<"peers">>], Req, _Pid) ->
+	% ordered (by Rating) list of {PeerID, Rating, Host, Port}
+	TopPeers = ar_rating:get_top(500),
+	% make a tuple with randomized value [{RandomValue, {Host, Port}}|...]
+	R = [ {rand:uniform(), {Host, Port}} || {_PeerID, _Rating, Host, Port} <- TopPeers ],
+	% list of magic we should make with R
+	%  - sort it by the RandomValue
+	%  - cut the list to the 100 elements
+	%  - remove RandomValue
+	%  - transform {{A,B,C,D}, Port} into the binary string
+	%    <<"A.B.C.D:Port">>
+	Peers = [
+				lists:flatten(io_lib:format("~w.~w.~w.~w:~w", [A, B, C, D, Port]))
+				||
+				{_,{{A,B,C,D},Port}} <- lists:sublist(lists:sort(R), 100)
+			],
 	{200, #{},
-		ar_serialize:jsonify(
-			[
-				list_to_binary(ar_util:format_peer(P))
-			||
-				P <- ar_bridge:get_remote_peers(),
-				P /= ar_http_util:arweave_peer(Req)
-			]
-		),
+		ar_serialize:jsonify(Peers),
 	Req};
 
 %% @doc Return the estimated transaction fee not including a new wallet fee.
@@ -1357,7 +1365,7 @@ return_info(Req) ->
 						end
 					},
 					{blocks, ar_storage:blocks_on_disk()},
-					{peers, length(ar_bridge:get_remote_peers())},
+					{peers, length(ar_rating:get_top(1000))},
 					{queue_length,
 						element(
 							2,

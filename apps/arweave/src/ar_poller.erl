@@ -6,90 +6,180 @@
 -module(ar_poller).
 -behaviour(gen_server).
 
+%%% This module fetches blocks from the network in case the node hasn't
+%%% received blocks for some other reason.
+
 -export([start_link/0]).
 
 -export([
 	init/1,
-	handle_cast/2, handle_call/3
+	handle_call/3,
+	handle_cast/2,
+	handle_info/2,
+	terminate/2,
+	code_change/3
 ]).
 
 -include_lib("arweave/include/ar.hrl").
 -include_lib("arweave/include/ar_config.hrl").
 
-%%% This module fetches blocks from trusted peers in case the node is not in the
-%%% public network or hasn't received blocks for some other reason.
+-record(state, {
+	joined = false,
+	connected = false,
+	last_seen_height = -1,
+	interval,
+	poll_timer
+}).
 
-%%%===================================================================
-%%% Public API.
-%%%===================================================================
-
+%%--------------------------------------------------------------------
+%% @doc
+%% Starts the server
+%%
+%% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
+%% @end
+%%--------------------------------------------------------------------
 start_link() ->
 	gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 %%%===================================================================
-%%% Generic server callbacks.
+%%% gen_server callbacks
 %%%===================================================================
 
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Initializes the server
+%%
+%% @spec init(Args) -> {ok, State} |
+%%					   {ok, State, Timeout} |
+%%					   ignore |
+%%					   {stop, Reason}
+%% @end
+%%--------------------------------------------------------------------
 init([]) ->
 	?LOG_INFO([{event, ar_poller_start}]),
 	{ok, Config} = application:get_env(arweave, config),
-	{ok, _} = schedule_polling(Config#config.polling * 1000),
-	{ok, #{
-		last_seen_height => -1,
-		interval => Config#config.polling
+	ar_events:subscribe(node, network),
+	gen_server:cast(?MODULE, poll),
+	{ok, #state{
+		joined = ar_node:is_joined(),
+		connected = ar_network:is_connected(),
+		last_seen_height = -1,
+		interval = Config#config.polling
 	}}.
 
-handle_cast(poll_block, State) ->
-	#{
-		last_seen_height := LastSeenHeight,
-		interval := Interval
-	} = State,
-	?LOG_DEBUG("Polling. Checking current height ..."),
-	{NewLastSeenHeight, NeedPoll} =
-		case ar_node:get_height() of
-			-1 ->
-				%% Wait until the node joins the network or starts from a hash list.
-				{-1, false};
-			Height when LastSeenHeight == -1 ->
-				{Height, true};
-			Height when Height > LastSeenHeight ->
-				%% Skip this poll if the block has been already received by other means.
-				%% Under normal circumstances, we never poll.
-				{Height, false};
-			_ ->
-				{LastSeenHeight, true}
-		end,
-	NewState =
-		case NeedPoll of
-			true ->
-				?LOG_DEBUG("Polling block ~p ...", [NewLastSeenHeight + 1]),
-				case fetch_block(NewLastSeenHeight + 1) of
-					ok ->
-						%% Check if we have missed more than one block.
-						%% For instance, we could have missed several blocks
-						%% if it took some time to join the network.
-						{ok, _} = schedule_polling(2000),
-						State#{ last_seen_height => NewLastSeenHeight + 1 };
-					{error, _} ->
-						{ok, _} = schedule_polling(Interval * 1000),
-						State#{ last_seen_height => NewLastSeenHeight }
-				end;
-			false ->
-				Delay = case NewLastSeenHeight of -1 -> 200; _ -> Interval * 1000 end,
-				{ok, _} = schedule_polling(Delay),
-				State#{ last_seen_height => NewLastSeenHeight }
-		end,
-	{noreply, NewState}.
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Handling call messages
+%%
+%% @spec handle_call(Request, From, State) ->
+%%									 {reply, Reply, State} |
+%%									 {reply, Reply, State, Timeout} |
+%%									 {noreply, State} |
+%%									 {noreply, State, Timeout} |
+%%									 {stop, Reason, Reply, State} |
+%%									 {stop, Reason, State}
+%% @end
+%%--------------------------------------------------------------------
+handle_call(Request, _From, State) ->
+	?LOG_ERROR([{event, unhandled_call}, {request, Request}]),
+	{reply, ok, State}.
 
-handle_call(_Request, _From, State) ->
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Handling cast messages
+%%
+%% @spec handle_cast(Msg, State) -> {noreply, State} |
+%%									{noreply, State, Timeout} |
+%%									{stop, Reason, State}
+%% @end
+%%--------------------------------------------------------------------
+handle_cast(poll, State) when not State#state.connected ->
+	timer:cancel(State#state.poll_timer),
+	{noreply, State};
+handle_cast(poll, State) when not State#state.joined->
+	timer:cancel(State#state.poll_timer),
+	{noreply, State};
+
+handle_cast(poll, State) ->
+	?LOG_DEBUG("Polling. Checking current height ..."),
+	case ar_node:get_height() of
+		Height when Height > State#state.last_seen_height ->
+			{ok, T} = timer:send_after(State#state.interval, {'$gen_cast', poll}),
+			{noreply, State#state{poll_timer = T, last_seen_height = Height}};
+		Height ->
+			?LOG_DEBUG("Polling block ~p ...", [Height + 1]),
+			case fetch_block(Height + 1) of
+				ok ->
+					{ok, T} = timer:send_after(State#state.interval, {'$gen_cast', poll}),
+					{noreply, State#state{ poll_timer = T, last_seen_height = Height + 1 }};
+				{error, _} ->
+					{ok, T} = timer:send_after(State#state.interval, {'$gen_cast', poll}),
+					{noreply, State#state{ poll_timer = T, last_seen_height = Height }}
+			end
+	end;
+
+handle_cast(Msg, State) ->
+	?LOG_ERROR([{event, unhandled_cast}, {message, Msg}]),
 	{noreply, State}.
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Handling all non call/cast messages
+%%
+%% @spec handle_info(Info, State) -> {noreply, State} |
+%%									 {noreply, State, Timeout} |
+%%									 {stop, Reason, State}
+%% @end
+%%--------------------------------------------------------------------
+handle_info({event, node, ready}, State) ->
+	?LOG_DEBUG("Start polling..."),
+	gen_server:cast(?MODULE, poll),
+	{noreply, State#state{joined = true}};
+handle_info({event, node, _}, State) ->
+	timer:cancel(State#state.poll_timer),
+	{noreply, State};
+handle_info({event, network, connected}, State) when State#state.joined ->
+	?LOG_DEBUG("Start polling..."),
+	gen_server:cast(?MODULE, poll),
+	{noreply, State#state{connected = true}};
+handle_info({event, network, disconnected}, State) ->
+	?LOG_DEBUG("Stop polling. Waiting for the network..."),
+	timer:cancel(State#state.poll_timer),
+	{noreply, State#state{connected = false}}.
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% This function is called by a gen_server when it is about to
+%% terminate. It should be the opposite of Module:init/1 and do any
+%% necessary cleaning up. When it returns, the gen_server terminates
+%% with Reason. The return value is ignored.
+%%
+%% @spec terminate(Reason, State) -> void()
+%% @end
+%%--------------------------------------------------------------------
+terminate(Reason, _State) ->
+	?LOG_INFO([{event, ar_network_terminated}, {reason, Reason}]),
+	ok.
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Convert process state when code is changed
+%%
+%% @spec code_change(OldVsn, State, Extra) -> {ok, NewState}
+%% @end
+%%--------------------------------------------------------------------
+code_change(_OldVsn, State, _Extra) ->
+	{ok, State}.
 
 %%%===================================================================
 %%% Internal functions.
 %%%===================================================================
-
-schedule_polling(Interval) ->
-	timer:apply_after(Interval, gen_server, cast, [self(), poll_block]).
 
 fetch_block(Height) ->
 	case ar_network:get_block_shadow(Height) of
@@ -121,6 +211,7 @@ fetch_previous_blocks2(FetchedBShadow, BehindCurrentHL) ->
 fetch_previous_blocks2(_FetchedBShadow, _BehindCurrentHL, FetchedBlocks)
 		when length(FetchedBlocks) >= ?STORE_BLOCKS_BEHIND_CURRENT ->
 	{error, failed_to_reconstruct_block_hash_list};
+
 fetch_previous_blocks2(FetchedBShadow, BehindCurrentHL, FetchedBlocks) ->
 	PrevH = FetchedBShadow#block.previous_block,
 	case lists:dropwhile(fun(H) -> H /= PrevH end, BehindCurrentHL) of
@@ -147,5 +238,6 @@ submit_fetched_blocks([B | Blocks], ReceiveTimestamp) ->
 	]),
 	ar_events:send(block, {new, B, poller}),
 	submit_fetched_blocks(Blocks, ReceiveTimestamp);
+
 submit_fetched_blocks([], _ReceiveTimestamp) ->
 	ok.

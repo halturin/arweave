@@ -24,6 +24,13 @@
 -include_lib("arweave/include/ar_config.hrl").
 -include_lib("arweave/include/ar_rating.hrl").
 
+%% @doc The frequency of updating best peers' sync records.
+-ifdef(DEBUG).
+-define(PEER_SYNC_RECORDS_FREQUENCY_MS, 500).
+-else.
+-define(PEER_SYNC_RECORDS_FREQUENCY_MS, 2 * 60 * 1000).
+-endif.
+
 %% Internal state definition.
 -record(state, {
 	since = os:system_time(second),
@@ -34,9 +41,13 @@
 	peer_port,
 	peer_id,
 	peers = #{}, % map of peers
+	sync_record, % via ar_network:get_sync_record
 	validate_time = true,
 	fails = 0,
-	module = ar_network_http_client % default mode is stateless
+	module = ar_network_http_client, % default mode is stateless
+
+	timer_get_peers,
+	timer_update_sync_record
 }).
 
 %%%===================================================================
@@ -101,6 +112,9 @@ init({{IP,Port}, Options}) ->
 %%									 {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_call({request, get_sync_record, _Args}, _From, State) ->
+	Reply = {State#state.peer_id, State#state.sync_record},
+	{reply, Reply, State};
 handle_call({request, Request, Args}, _From, State) when is_atom(Request) ->
 	T = os:system_time(millisecond),
 	case catch (State#state.module):Request(State#state.peer_ipport, Args) of
@@ -158,13 +172,8 @@ handle_cast(validate_network, State) ->
 	end;
 
 handle_cast(validate_time, State) when State#state.validate_time == false ->
-	Joined = {joined,
-		State#state.peer_id,
-		State#state.peer_ip,
-		State#state.peer_port
-	},
-	ar_events:send(peer, Joined),
 	gen_server:cast(self(), get_peers),
+	gen_server:cast(self(), update_sync_record),
 	Args = #{
 		peer_id => State#state.peer_id,
 		peer_ip => State#state.peer_ip,
@@ -217,21 +226,44 @@ handle_cast(validate_time, State) ->
 	end;
 
 handle_cast(get_peers, State) ->
-	timer:send_after(60000, {'$gen_cast', get_peers}),
+	{ok, T} = timer:send_after(60000, {'$gen_cast', get_peers}),
 	Now = os:system_time(second),
 	case (State#state.module):get_peers(State#state.peer_ipport, {}) of
 		{ok, Peers} when State#state.lifespan < Now ->
 			lists:map(fun({A,B,C,D,Port}) ->
 				ar_network:add_peer_candidate({A,B,C,D}, Port)
 			end, Peers),
+			timer:cancel(T),
 			{stop, normal, State};
 		{ok, Peers} when is_list(Peers) ->
 			lists:map(fun({A,B,C,D,Port}) ->
 				ar_network:add_peer_candidate({A,B,C,D}, Port)
 			end, Peers),
-			{noreply, State};
+			{noreply, State#state{timer_get_peers = T}};
 		_ ->
-			{noreply, State}
+			{noreply, State#state{timer_get_peers = T}}
+	end;
+
+handle_cast(update_sync_record, State) ->
+	{ok, T} = timer:send_after(?PEER_SYNC_RECORDS_FREQUENCY_MS, {'$gen_cast', update_sync_record}),
+	Now = os:system_time(second),
+	case (State#state.module):get_sync_record(State#state.peer_ipport, {}) of
+		{ok, _SyncRecord} when State#state.lifespan < Now ->
+			timer:cancel(T),
+			{stop, normal, State};
+		{ok, SyncRecord} when State#state.sync_record == undefined ->
+			%% since we got the record state, tell everyone that peer is joined
+			Joined = {joined,
+				State#state.peer_id,
+				State#state.peer_ip,
+				State#state.peer_port
+			},
+			ar_events:send(peer, Joined),
+			{noreply, State#state{sync_record = SyncRecord, timer_update_sync_record = T}};
+		{ok, SyncRecord} ->
+			{noreply, State#state{sync_record = SyncRecord, timer_update_sync_record = T}};
+		_ ->
+			{noreply, State#state{timer_update_sync_record = T}}
 	end;
 
 handle_cast(Msg, State) ->
@@ -266,8 +298,10 @@ handle_info(Info, State) ->
 %% @spec terminate(Reason, State) -> void()
 %% @end
 %%--------------------------------------------------------------------
-terminate(Reason, _State) ->
+terminate(Reason, State) ->
 	?LOG_INFO([{event, ar_network_peer_terminated}, {reason, Reason}]),
+	timer:cancel(State#state.timer_get_peers),
+	timer:cancel(State#state.timer_update_sync_record),
 	ok.
 
 %%--------------------------------------------------------------------

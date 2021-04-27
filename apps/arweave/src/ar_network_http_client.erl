@@ -262,6 +262,7 @@ get_sync_record(Peer, _) ->
 
 get_chunk(Peer, Offset) ->
 	?LOG_DEBUG("HTTP Client: get_chunk(~p). ~p", [Offset, Peer]),
+	% Byte2 = ar_tx_blacklist:get_next_not_blacklisted_byte(Byte + 1),
 	case catch
 		ar_http:req(#{
 			peer => Peer,

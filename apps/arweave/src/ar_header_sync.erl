@@ -367,8 +367,8 @@ process_item(Queue) ->
 				when BackoffTimestamp > Now ->
 			enqueue(Item, Backoff, UpdatedQueue);
 		{{value, {{block, {H, H2, TXRoot}}, Backoff}}, UpdatedQueue} ->
-			case download_block(H, H2, TXRoot) of
-				{error, _Reason} ->
+			case read_block(H, H2, TXRoot) of
+				error ->
 					UpdatedBackoff = update_backoff(Backoff),
 					enqueue({block, {H, H2, TXRoot}}, UpdatedBackoff, UpdatedQueue);
 				{ok, B} ->
@@ -384,25 +384,24 @@ update_backoff({_Timestamp, Interval}) ->
 	UpdatedInterval = min(?MAX_BACKOFF_INTERVAL_S, Interval * 2),
 	{os:system_time(second) + UpdatedInterval, UpdatedInterval}.
 
-download_block(H, H2, TXRoot) ->
-	Peers = ar_bridge:get_remote_peers(),
+read_block(H, H2, TXRoot) ->
 	case ar_storage:read_block(H) of
 		unavailable ->
-			download_block(Peers, H, H2, TXRoot);
+			download_block(H, H2, TXRoot);
 		B ->
-			download_txs(Peers, B, TXRoot)
+			download_txs(B, TXRoot)
 	end.
 
-download_block(Peers, H, H2, TXRoot) ->
+download_block(H, H2, TXRoot) ->
 	Fork_2_0 = ar_fork:height_2_0(),
-	case ar_http_iface_client:get_block_shadow(Peers, H) of
+	case ar_network:get_block_shadow(H) of
 		unavailable ->
 			?LOG_WARNING([
 				{event, ar_header_sync_failed_to_download_block_header},
 				{block, ar_util:encode(H)}
 			]),
-			{error, block_header_unavailable};
-		{Peer, #block{ height = Height } = B} ->
+			error;
+		#block{ height = Height } = B ->
 			BH =
 				case Height >= Fork_2_0 of
 					true ->
@@ -414,22 +413,33 @@ download_block(Peers, H, H2, TXRoot) ->
 				end,
 			case BH of
 				H when Height >= Fork_2_0 ->
-					download_txs(Peers, B, TXRoot);
+					download_txs(B, TXRoot);
 				H2 when Height < Fork_2_0 ->
-					download_txs(Peers, B, TXRoot);
+					download_txs(B, TXRoot);
 				_ ->
 					?LOG_WARNING([
 						{event, ar_header_sync_block_hash_mismatch},
-						{block, ar_util:encode(H)},
-						{peer, ar_util:format_peer(Peer)}
+						{block, ar_util:encode(H)}
 					]),
 					{error, block_hash_mismatch}
 			end
 	end.
 
-download_txs(Peers, B, TXRoot) ->
-	case ar_http_iface_client:get_txs(Peers, #{}, B) of
-		{ok, TXs} ->
+download_txs(B, TXRoot) ->
+	case ar_network:get_txs(B#block.txs) of
+		unavailable ->
+			?LOG_WARNING([
+				{event, ar_header_sync_block_tx_not_found},
+				{block, ar_util:encode(B#block.indep_hash)}
+			]),
+			error;
+		{partial,_,_} ->
+			?LOG_WARNING([
+				{event, ar_header_sync_block_tx_not_found},
+				{block, ar_util:encode(B#block.indep_hash)}
+			]),
+			error;
+		TXs ->
 			SizeTaggedTXs = ar_block:generate_size_tagged_list_from_txs(TXs),
 			SizeTaggedDataRoots =
 				[{Root, Offset} || {{_, Root}, Offset} <- SizeTaggedTXs],
@@ -440,39 +450,21 @@ download_txs(Peers, B, TXRoot) ->
 					case move_data_to_v2_index(TXs) of
 						ok ->
 							{ok, B#block{ txs = TXs }};
-						{error, Reason} = Error ->
+						{error, Reason} ->
 							?LOG_WARNING([
 								{event, ar_header_sync_failed_to_migrate_v1_txs},
 								{block, ar_util:encode(B#block.indep_hash)},
 								{reason, Reason}
 							]),
-							Error
+							error
 					end;
 				_ ->
 						?LOG_WARNING([
 							{event, ar_header_sync_block_tx_root_mismatch},
 							{block, ar_util:encode(B#block.indep_hash)}
 						]),
-						{error, block_tx_root_mismatch}
-			end;
-		{error, txs_exceed_block_size_limit} ->
-			?LOG_WARNING([
-				{event, ar_header_sync_block_txs_exceed_block_size_limit},
-				{block, ar_util:encode(B#block.indep_hash)}
-			]),
-			{error, txs_exceed_block_size_limit};
-		{error, txs_count_exceeds_limit} ->
-			?LOG_WARNING([
-				{event, ar_header_sync_block_txs_count_exceeds_limit},
-				{block, ar_util:encode(B#block.indep_hash)}
-			]),
-			{error, txs_count_exceeds_limit};
-		{error, tx_not_found} ->
-			?LOG_WARNING([
-				{event, ar_header_sync_block_tx_not_found},
-				{block, ar_util:encode(B#block.indep_hash)}
-			]),
-			{error, tx_not_found}
+						error
+			end
 	end.
 
 move_data_to_v2_index(TXs) ->

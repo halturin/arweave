@@ -35,7 +35,10 @@
 	get_txs/1,
 	get_wallet_list/1,
 	get_wallet_list_chunk/1,
-	get_wallet_list_chunk/2
+	get_wallet_list_chunk/2,
+
+	get_sync_records/0,
+	get_chunks/1
 ]).
 
 -include_lib("arweave/include/ar.hrl").
@@ -178,6 +181,14 @@ get_wallet_list_chunk(ID) ->
 	request(sequential, {get_wallet_list_chunk, ID}, 10000).
 get_wallet_list_chunk(ID, Cursor) ->
 	request(sequential, {get_wallet_list_chunk, {ID, Cursor}}, 10000).
+
+get_sync_records() ->
+	request({broadcast, #{}, ?PEERS_JOINED_MAX}, {get_sync_record, []}, 60000).
+
+% Chunks - is a proplist with value [{PeerID, Offset}|...]
+get_chunks(Chunks) ->
+	request(affinity, {get_chunk, Chunks}, 60000).
+
 %%--------------------------------------------------------------------
 %% @doc
 %% Starts the server
@@ -359,8 +370,7 @@ handle_info({event, peer, {joined, PeerID, IP, Port}}, State) ->
 			?LOG_ERROR("internal error. got event joined from unknown peer",[{IP, Port, PeerID}]),
 			{noreply, State};
 		[{{IP,Port}, Pid, undefined, _}] when length(Joined) == 0 ->
-			?LOG_DEBUG("Network. First peer joined"),
-			?LOG_DEBUG("Network. First peer ~p:~p joined (~p)", [IP, Port, length(Joined), Pid]),
+			?LOG_DEBUG("Network. First peer ~p:~p joined (~p)", [IP, Port, Pid]),
 			ar_events:send(network, connected),
 			T = os:system_time(second),
 			ets:insert(?MODULE, {{IP,Port}, Pid, T, PeerID}),
@@ -419,6 +429,7 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
 peering(IP, Port, Options)->
 	?LOG_DEBUG("Network. Peering with ~p. Connecting...", [{IP,Port}]),
 	T = os:system_time(second),
@@ -535,14 +546,20 @@ request(parallel, {_Request, []}, _Timeout) ->
 	[];
 request(parallel, {Request, Args}, Timeout) ->
 	Peers = peers_top_joined(),
-	do_request_parallel({Request, Args}, Timeout, Peers).
+	do_request_parallel({Request, Args}, Timeout, Peers);
 
+% making requests to the given peers. Args must be a proplist
+% with value [{PeerID, Arg},...]
+request(affinity, {Request, [{_,_}|_] = Args}, Timeout) ->
+	do_request_affinity({Request, Args}, Timeout).
 %
 % do sequential request
 %
 do_request_sequential({Request, Args}, Timeout, Peers) ->
 	Origin = self(),
-	R = spawn(fun() -> do_sequential_spawn(Origin, {Request, Args}, Timeout, Peers) end),
+	PeersWithRandoms = [ {rand:uniform(), P} || P <- Peers ],
+	ShuffledPeers = [X || {_,X} <- lists:sort(PeersWithRandoms)],
+	R = spawn(fun() -> do_sequential_spawn(Origin, {Request, Args}, Timeout, ShuffledPeers) end),
 	receive
 		{final, Result} ->
 			Result
@@ -661,4 +678,55 @@ do_parallel_spawn(Origin, {Request, [A|Args]}, {N, Results}, Timeout, [Peer|Peer
 			end
 	end),
 	do_parallel_spawn(Origin, {Request, Args}, {N+1, Results}, Timeout, Peers).
+
+%
+% do affinity request (binding to a peer)
+%
+do_request_affinity({Request, Args}, Timeout) ->
+	Origin = self(),
+	PeersMap = lists:foldl(fun({_IP, _Port, Pid, PeerID}, Acc) ->
+		maps:put(PeerID, Pid, Acc)
+	end, #{}, peers_joined()),
+	Receiver = spawn(fun() -> do_affinity_spawn(Origin, {Request, Args}, {0,#{}}, Timeout, PeersMap) end),
+	receive
+		{final, Result} ->
+			Result
+	after Timeout*3 ->
+		exit(Receiver, timeout),
+		error
+	end.
+
+do_affinity_spawn(Origin, {_Request, []}, {0, Results}, _Timeout, _PeersMap) ->
+	Origin ! {final, Results};
+do_affinity_spawn(Origin, {Request, Args}, {N, Results}, Timeout, PeersMap)
+								when N > ?MAX_PARALLEL_REQUESTS; Args == [] ->
+	receive
+		{error, PeerID} ->
+			Results1 = maps:put(PeerID, error, Results),
+			do_affinity_spawn(Origin, {Request, Args}, {N-1, Results1}, Timeout, PeersMap);
+		{not_found, PeerID} ->
+			Results1 = maps:put(PeerID, not_found, Results),
+			do_affinity_spawn(Origin, {Request, Args}, {N-1, Results1}, Timeout, PeersMap);
+		{result, PeerID, Result} ->
+			Results1 = maps:put(PeerID, Result, Results),
+			do_affinity_spawn(Origin, {Request, Args}, {N-1, Results1}, Timeout, PeersMap)
+	end;
+
+do_affinity_spawn(Origin, {Request, [{PeerID, A} |Args]}, {N, Results}, Timeout, PeersMap) ->
+	Receiver = self(),
+	Pid = maps:get(PeerID, PeersMap, undefined),
+	spawn_link(fun() ->
+			case catch gen_server:call(Pid, {request, Request, A}, Timeout) of
+				{result, Result} ->
+					?LOG_DEBUG("do_affinity_spawn OK ~p", [{Pid, Request, A}]),
+					Receiver ! {result, PeerID, Result};
+				not_found ->
+					Receiver ! {not_found, PeerID};
+				E ->
+					?LOG_DEBUG("do_affinity_spawn (~p) ~p", [{Pid, Request, A}, E]),
+					Receiver ! {error, PeerID}
+			end
+	end),
+	do_affinity_spawn(Origin, {Request, Args}, {N+1, Results}, Timeout, PeersMap).
+
 
