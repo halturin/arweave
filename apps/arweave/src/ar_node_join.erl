@@ -98,7 +98,7 @@ handle_call(Request, _From, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_cast(join, State) ->
-	?LOG_ERROR("Node joining start."),
+	?LOG_DEBUG("Node joining start."),
 	{ok, Config} = application:get_env(arweave, config),
 	BI =
 		case {Config#config.start_from_block_index, Config#config.init} of

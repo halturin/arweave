@@ -113,8 +113,7 @@ init({{IP,Port}, Options}) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_call({request, get_sync_record, _Args}, _From, State) ->
-	Reply = {State#state.peer_id, State#state.sync_record},
-	{reply, Reply, State};
+	{reply, {result, State#state.sync_record}, State};
 handle_call({request, Request, Args}, _From, State) when is_atom(Request) ->
 	T = os:system_time(millisecond),
 	case catch (State#state.module):Request(State#state.peer_ipport, Args) of
@@ -245,14 +244,16 @@ handle_cast(get_peers, State) ->
 	end;
 
 handle_cast(update_sync_record, State) ->
-	{ok, T} = timer:send_after(?PEER_SYNC_RECORDS_FREQUENCY_MS, {'$gen_cast', update_sync_record}),
 	Now = os:system_time(second),
+	{ok, T} = timer:send_after(?PEER_SYNC_RECORDS_FREQUENCY_MS, {'$gen_cast', update_sync_record}),
 	case (State#state.module):get_sync_record(State#state.peer_ipport, {}) of
 		{ok, _SyncRecord} when State#state.lifespan < Now ->
 			timer:cancel(T),
 			{stop, normal, State};
 		{ok, SyncRecord} when State#state.sync_record == undefined ->
 			%% since we got the record state, tell everyone that peer is joined
+			?LOG_DEBUG("Updated sync record for ~p with ~p intervals",
+					   [State#state.peer_id, element(1,SyncRecord)]),
 			Joined = {joined,
 				State#state.peer_id,
 				State#state.peer_ip,
@@ -261,9 +262,13 @@ handle_cast(update_sync_record, State) ->
 			ar_events:send(peer, Joined),
 			{noreply, State#state{sync_record = SyncRecord, timer_update_sync_record = T}};
 		{ok, SyncRecord} ->
+			?LOG_DEBUG("Updated sync record for ~p with ~p intervals",
+					   [State#state.peer_id, element(1,SyncRecord)]),
 			{noreply, State#state{sync_record = SyncRecord, timer_update_sync_record = T}};
 		_ ->
-			{noreply, State#state{timer_update_sync_record = T}}
+			?LOG_DEBUG("Couldn't get sync_record from ~p", [State#state.peer_id]),
+			timer:cancel(T),
+			{stop, normal, State}
 	end;
 
 handle_cast(Msg, State) ->
@@ -280,7 +285,7 @@ handle_cast(Msg, State) ->
 %%									 {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_info({gun_down,_,http,closed,_,_}, State) ->
+handle_info({gun_down,_,http,_,_,_}, State) ->
 	% ignore http client artifact
 	{noreply, State};
 handle_info(Info, State) ->
@@ -298,8 +303,7 @@ handle_info(Info, State) ->
 %% @spec terminate(Reason, State) -> void()
 %% @end
 %%--------------------------------------------------------------------
-terminate(Reason, State) ->
-	?LOG_INFO([{event, ar_network_peer_terminated}, {reason, Reason}]),
+terminate(_Reason, State) ->
 	timer:cancel(State#state.timer_get_peers),
 	timer:cancel(State#state.timer_update_sync_record),
 	ok.

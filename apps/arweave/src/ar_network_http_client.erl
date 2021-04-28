@@ -254,15 +254,19 @@ get_sync_record(Peer, _) ->
 	})
 	of
 		{ok, {{<<"200">>, _}, _, Body, _, _}} ->
-			ar_intervals:safe_from_etf(Body);
+			case ar_intervals:safe_from_etf(Body) of
+				{ok, Intervals} ->
+					{ok, Intervals};
+				_ ->
+					unavailable
+			end;
 		E ->
-			?LOG_DEBUG("HTTP Client error: get_sync_record() ~p", [E]),
+			?LOG_DEBUG("HTTP Client error: get_sync_record() ~p. Peer ~p", [E, Peer]),
 			unavailable
 	end.
 
 get_chunk(Peer, Offset) ->
 	?LOG_DEBUG("HTTP Client: get_chunk(~p). ~p", [Offset, Peer]),
-	% Byte2 = ar_tx_blacklist:get_next_not_blacklisted_byte(Byte + 1),
 	case catch
 		ar_http:req(#{
 			peer => Peer,
@@ -275,7 +279,7 @@ get_chunk(Peer, Offset) ->
 	})
 	of
 		{ok, {{<<"200">>, _}, _, Body, _, _}} ->
-			ar_serialize:json_map_to_chunk_proof(jiffy:decode(Body, [return_maps]));
+			{ok, ar_serialize:json_map_to_chunk_proof(jiffy:decode(Body, [return_maps]))};
 		E ->
 			?LOG_DEBUG("HTTP Client error: get_chunk() ~p", [E]),
 			unavailable

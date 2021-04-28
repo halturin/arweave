@@ -404,13 +404,7 @@ init([]) ->
 		disk_pool_size = DiskPoolSize,
 		disk_pool_cursor = first
 	},
-	{ok, Config} = application:get_env(arweave, config),
-	lists:foreach(
-		fun(_SyncingJobNumber) ->
-			gen_server:cast(?MODULE, sync_random_interval)
-		end,
-		lists:seq(1, Config#config.sync_jobs)
-	),
+	gen_server:cast(?MODULE, sync_random_interval),
 	gen_server:cast(?MODULE, update_disk_pool_data_roots),
 	gen_server:cast(?MODULE, process_disk_pool_item),
 	gen_server:cast(?MODULE, store_sync_state),
@@ -604,17 +598,19 @@ handle_cast(check_space, State)
 	{noreply, State#state{free_space = FreeSpace}};
 
 handle_cast(check_space, State) ->
+	?LOG_DEBUG("check space"),
 	FreeSpace = ar_storage:get_free_space(),
 	gen_server:cast(?MODULE, sync_random_interval),
 	{noreply, State#state{free_space = FreeSpace}};
 
 handle_cast(sync_random_interval, State)
 			when not State#state.connected ->
-	?LOG_DEBUG("Data Sync. Waiting for the network..."),
+	?LOG_DEBUG("Data Sync paused. Waiting for the network..."),
 	{noreply, State};
 
 handle_cast(sync_random_interval, State)
 			when State#state.free_space < ?DISK_DATA_BUFFER_SIZE ->
+	?LOG_DEBUG("sync random interval. not enough space"),
 	cast_after(ar_disksup:get_disk_space_check_frequency(), check_space),
 	Msg =
 		"The node has stopped syncing data - the available disk space is"
@@ -630,14 +626,20 @@ handle_cast(sync_random_interval, State) ->
 		sync_record = SyncRecord,
 		weave_size = WeaveSize
 	} = State,
+	?LOG_DEBUG("sync random interval"),
 	FreeSpace = ar_storage:get_free_space(),
 	PeerSyncRecords = ar_network:get_sync_records(),
+	% shuffle and limit the list of PeersSyncRecord?
 	case get_random_interval(SyncRecord, PeerSyncRecords, WeaveSize) of
-		{ok, Chunks} when length(Chunks) > 0 ->
+		Chunks when length(Chunks) > 0 ->
 			% Chunks = [{PeerID, LeftBound, RightBound} | ...]
-			gen_server:cast(self(), {sync_chunks, Chunks}),
+			?LOG_DEBUG("Sync data. Chunks (intervals): ~p", [Chunks]),
+			lists:map(fun({PeerID, LeftBound, RightBound}) ->
+				gen_server:cast(self(), {sync_chunk, PeerID, LeftBound, RightBound})
+			end, Chunks),
 			{noreply, State#state{free_space = FreeSpace}};
-		_ ->
+		E ->
+			?LOG_DEBUG("Sync data. get_random_interval ~p", [E]),
 			timer:apply_after(
 				?SYNC_RANDOM_INTERVAL,
 				gen_server,
@@ -647,38 +649,48 @@ handle_cast(sync_random_interval, State) ->
 			{noreply, State#state{free_space = FreeSpace}}
 	end;
 
-handle_cast({sync_chunks, Chunks}, State) ->
-	?LOG_DEBUG("KKKKKKKKKKKKKK SYNC CHUNKS ~p", [Chunks]),
-	% Chunks = [{PeerID, LeftBound, RightBound} | ...]
-	%Self = self(),
-	%spawn(
-	%	fun() ->
-	%		case ar_network:get_chunks(Chunks) of
-
-	%		end
-	%		Byte2 = ar_tx_blacklist:get_next_not_blacklisted_byte(Byte + 1),
-	%		case ar_http_iface_client:get_chunk(Peer, Byte2) of
-	%			{ok, Proof} ->
-	%				gen_server:cast(
-	%					Self,
-	%					{
-	%						store_fetched_chunk,
-	%						Byte2 - 1,
-	%						RightBound,
-	%						Proof
-	%					}
-	%				);
-	%			{error, _} ->
-	%				gen_server:cast(Self, {sync_random_interval, [Peer]})
-	%		end
-	%	end
-	%),
+handle_cast({sync_chunk, _, Byte, RightBound}, State) when Byte >= RightBound ->
+	?LOG_DEBUG("sync chunk. reach the bound"),
+	gen_server:cast(self(), sync_random_interval),
+	{noreply, State};
+handle_cast({sync_chunk, PeerID, Byte, RightBound}, State) ->
+	?LOG_DEBUG("sync chunk. spawn get_chunks ~p ~p", [PeerID, Byte]),
+	spawn(
+		fun() ->
+			Byte2 = ar_tx_blacklist:get_next_not_blacklisted_byte(Byte + 1),
+			case ar_network:get_chunks([{PeerID, Byte2}]) of
+				error ->
+					gen_server:cast(?MODULE, sync_random_interval);
+				Proofs ->
+					case maps:get(PeerID, Proofs, undefined) of
+						undefined ->
+							?LOG_ERROR("internal error in sync_chank fetching");
+						not_found ->
+							?LOG_DEBUG("Sync data. chunk offset ~p on ~p is not found", [Byte2, PeerID]);
+						error ->
+							?LOG_ERROR("Sync data. error getting chunk offset ~p on ~p", [Byte2, PeerID]);
+						Proof ->
+							gen_server:cast(
+								?MODULE,
+								{
+									store_fetched_chunk,
+									PeerID,
+									Byte2 - 1,
+									RightBound,
+									Proof
+								}
+							)
+					end
+			end
+		end
+	),
 	{noreply, State};
 
 handle_cast({store_fetched_chunk, PeerID, Byte, RightBound, Proof}, State) ->
 	#state{
 		data_root_offset_index = DataRootOffsetIndex
 	} = State,
+	?LOG_DEBUG("store fetched chunkd. ~p ~p", [PeerID, Byte]),
 	#{ data_path := DataPath, tx_path := TXPath, chunk := Chunk } = Proof,
 	{ok, Key, Value} = ar_kv:get_prev(DataRootOffsetIndex, << Byte:?OFFSET_KEY_BITSIZE >>),
 	<< BlockStartOffset:?OFFSET_KEY_BITSIZE >> = Key,
@@ -698,7 +710,7 @@ handle_cast({store_fetched_chunk, PeerID, Byte, RightBound, Proof}, State) ->
 					{noreply, State};
 				true ->
 					Byte2 = Byte + ChunkSize,
-					gen_server:cast(?MODULE, {sync_chunks, [{PeerID, Byte2, RightBound}]}),
+					gen_server:cast(?MODULE, {sync_chunk, PeerID, Byte2, RightBound}),
 					store_fetched_chunk(
 						{
 							DataRoot,
@@ -1593,25 +1605,25 @@ get_random_interval(SyncRecord, PeerSyncRecords, WeaveSize) ->
 	%% a random subset of the intervals is served to peers.
 	%% Include at least one byte - relevant for tests where the weave can be very small.
 	SyncSize = max(1, WeaveSize div ?MAX_SHARED_SYNCED_INTERVALS_COUNT),
-	maps:fold(
-		fun (_, _, {ok, {Peer, L, R}}) ->
-				{ok, {Peer, L, R}};
-			(Peer, PeerSyncRecord, none) ->
+	lists:foldl(
+		fun ({_PeerID, _PeerSyncRecord}, Acc) when length(Acc) > 5 ->
+				Acc;
+			({PeerID, PeerSyncRecord}, Acc) ->
 				PeerSyncRecordBelowWeaveSize = ar_intervals:cut(PeerSyncRecord, WeaveSize),
 				I = ar_intervals:outerjoin(SyncRecord, PeerSyncRecordBelowWeaveSize),
 				Sum = ar_intervals:sum(I),
 				case Sum of
 					0 ->
-						none;
+						Acc;
 					_ ->
 						RelativeByte = rand:uniform(Sum) - 1,
 						{L, Byte, R} =
 							ar_intervals:get_interval_by_nth_inner_number(I, RelativeByte),
 						LeftBound = max(L, Byte - SyncSize div 2),
-						{ok, {Peer, LeftBound, min(R, LeftBound + SyncSize)}}
+						[{PeerID, LeftBound, min(R, LeftBound + SyncSize)} | Acc]
 				end
 		end,
-		none,
+		[],
 		PeerSyncRecords
 	).
 

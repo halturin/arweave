@@ -59,7 +59,7 @@ start_link() ->
 init([]) ->
 	?LOG_INFO([{event, ar_poller_start}]),
 	{ok, Config} = application:get_env(arweave, config),
-	ar_events:subscribe(node, network),
+	ar_events:subscribe([node, network]),
 	gen_server:cast(?MODULE, poll),
 	{ok, #state{
 		joined = ar_node:is_joined(),
@@ -146,10 +146,17 @@ handle_info({event, network, connected}, State) when State#state.joined ->
 	?LOG_DEBUG("Start polling..."),
 	gen_server:cast(?MODULE, poll),
 	{noreply, State#state{connected = true}};
+handle_info({event, network, connected}, State) ->
+	% do nothing, waiting for the {event, node, ready}
+	{noreply, State#state{connected = true}};
+
 handle_info({event, network, disconnected}, State) ->
 	?LOG_DEBUG("Stop polling. Waiting for the network..."),
 	timer:cancel(State#state.poll_timer),
-	{noreply, State#state{connected = false}}.
+	{noreply, State#state{connected = false}};
+handle_info(Info, State) ->
+	?LOG_ERROR([{event, unhandled_info}, {info, Info}]),
+	{noreply, State}.
 
 %%--------------------------------------------------------------------
 %% @private

@@ -183,7 +183,17 @@ get_wallet_list_chunk(ID, Cursor) ->
 	request(sequential, {get_wallet_list_chunk, {ID, Cursor}}, 10000).
 
 get_sync_records() ->
-	request({broadcast, #{}, ?PEERS_JOINED_MAX}, {get_sync_record, []}, 60000).
+	case request({broadcast, #{}, ?PEERS_JOINED_MAX}, {get_sync_record, []}, 60000) of
+		error ->
+			unavailable;
+		{nopeers, _Result, _Args} ->
+			unavailable;
+		{timeout, _Result} ->
+			unavailavle;
+		Result ->
+			Result
+	end.
+
 
 % Chunks - is a proplist with value [{PeerID, Offset}|...]
 get_chunks(Chunks) ->
@@ -590,7 +600,7 @@ do_sequential_spawn(Origin, {Request, Args}, Timeout, [Peer|Peers]) ->
 %
 do_request_broadcast({Request, Args}, N, Timeout, Peers) ->
 	Origin = self(),
-	Receiver = spawn(fun() -> do_broadcast_spawn(Origin, {Request, Args}, {N,N,[]}, Timeout, Peers) end),
+	Receiver = spawn(fun() -> do_broadcast_spawn(Origin, {Request, Args}, {0,N,[]}, Timeout, Peers) end),
 	receive
 		{final, Result} ->
 			exit(Receiver, normal),
@@ -600,33 +610,34 @@ do_request_broadcast({Request, Args}, N, Timeout, Peers) ->
 		error
 	end.
 
-do_broadcast_spawn(Origin, {_Request, Args}, {_,_,Results}, _Timeout, []) ->
-	% no more peers
-	Origin ! {final, {nopeers, Results, Args}};
 do_broadcast_spawn(Origin, {_Request, _Args}, {0,0,Results}, _Timeout, _Peers) ->
 	Origin ! {final, Results};
-do_broadcast_spawn(Origin, {Request, Args}, {0,N,Results}, Timeout, Peers) ->
+do_broadcast_spawn(Origin, {_Request, Args}, {0,_N,Results}, _Timeout, []) ->
+	% no more peers
+	Origin ! {final, {nopeers, Results, Args}};
+do_broadcast_spawn(Origin, {Request, Args}, {S,N,Results}, Timeout, Peers)
+								when S > ?MAX_PARALLEL_REQUESTS; Peers == [] ->
 	receive
 		error ->
-			do_broadcast_spawn(Origin, {Request, Args}, {1,N,Results}, Timeout, Peers);
+			do_broadcast_spawn(Origin, {Request, Args}, {S-1,N-1,Results}, Timeout, Peers);
 		Result ->
-			do_broadcast_spawn(Origin, {Request, Args}, {0,N-1,[Result|Results]}, Timeout, Peers)
+			do_broadcast_spawn(Origin, {Request, Args}, {S-1,N-1,[Result|Results]}, Timeout, Peers)
 	after Timeout ->
 		Origin ! {final, {timeout, Results}}
 	end;
 do_broadcast_spawn(Origin, {Request, Args}, {S,N,Results}, Timeout, [Peer|Peers]) ->
 	Receiver = self(),
-	{_IP, _Port, Pid, _PeerID} = Peer,
+	{_IP, _Port, Pid, PeerID} = Peer,
 	spawn_link(fun() ->
 			case catch gen_server:call(Pid, {request, Request, Args}, Timeout) of
 				{result, Result} ->
-					Receiver ! Result;
+					Receiver ! {PeerID, Result};
 				E ->
 					?LOG_DEBUG("do_broadcast_spawn (~p) ~p", [{Pid, Request, Args}, E]),
 					Receiver ! error
 			end
 	end),
-	do_broadcast_spawn(Origin, {Request, Args}, Peers, {S-1,N,Results}, Timeout).
+	do_broadcast_spawn(Origin, {Request, Args}, {S+1,N,Results}, Timeout, Peers).
 
 %
 % do parallel request

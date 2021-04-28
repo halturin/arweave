@@ -152,10 +152,8 @@ handle_info(Info, State) ->
 %%--------------------------------------------------------------------
 terminate(_Reason, State) when State#state.router == true ->
 	ets:delete(?MODULE, State#state.peer_id),
-	?LOG_INFO([{event, ar_network_handler_terminated}, {module, ?MODULE}]),
 	ok;
 terminate(_Reason, _State) ->
-	?LOG_INFO([{event, ar_network_handler_terminated}, {module, ?MODULE}]),
 	ok.
 
 %%--------------------------------------------------------------------
