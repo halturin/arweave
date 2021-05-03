@@ -208,14 +208,14 @@ wait_until_joined() ->
 		fun() -> ar_node:is_joined() end,
 		100,
 		60 * 1000
-	 ).
+	).
 
 slave_wait_until_joined() ->
 	ar_util:do_until(
 		fun() -> slave_call(ar_node, is_joined, []) end,
 		100,
 		60 * 1000
-	 ).
+	).
 
 wait_until_height(TargetHeight) ->
 	{ok, BI} = ar_util:do_until(

@@ -470,6 +470,7 @@ influence(Rating) when is_record(Rating, rating) ->
 	% Compute age in days
 	Age = (os:system_time(second) - Rating#rating.since)/(60*60*24),
 	(1/-math:exp(Age/3))+1.
+
 %%
 %% Unit-tests
 %%

@@ -582,7 +582,6 @@ do_sequential_spawn(Origin, {_Request, Args}, _Timeout, []) ->
 	Origin ! {final, {nopeers, Args}};
 do_sequential_spawn(Origin, {Request, Args}, Timeout, [Peer|Peers]) ->
 	{_IP, _Port, Pid, _PeerID} = Peer,
-	?LOG_DEBUG("do_sequential_spawn ~p: ~p", [Peer, {Request, Args}]),
 	case catch gen_server:call(Pid, {request, Request, Args}, Timeout) of
 		{result, Result} ->
 			Origin ! {final, Result};
@@ -622,7 +621,7 @@ do_broadcast_spawn(Origin, {Request, Args}, {S,N,Results}, Timeout, Peers)
 			do_broadcast_spawn(Origin, {Request, Args}, {S-1,N-1,Results}, Timeout, Peers);
 		Result ->
 			do_broadcast_spawn(Origin, {Request, Args}, {S-1,N-1,[Result|Results]}, Timeout, Peers)
-	after Timeout ->
+	after Timeout*2 ->
 		Origin ! {final, {timeout, Results}}
 	end;
 do_broadcast_spawn(Origin, {Request, Args}, {S,N,Results}, Timeout, [Peer|Peers]) ->
@@ -740,4 +739,173 @@ do_affinity_spawn(Origin, {Request, [{PeerID, A} |Args]}, {N, Results}, Timeout,
 	end),
 	do_affinity_spawn(Origin, {Request, Args}, {N+1, Results}, Timeout, PeersMap).
 
+%%
+%% Unit-tests
+%%
+
+-include_lib("eunit/include/eunit.hrl").
+
+send_sequential_ok_test() ->
+	Test = fun() ->
+		Peers = helper_start_mock_peers(3),
+		Value = do_request_sequential({test, 5}, 3000, Peers),
+		helper_stop_mock_peers(Peers),
+		Value
+	end,
+	{timeout, 10, ?assertMatch(
+		5, Test()
+	)}.
+
+send_sequential_nopeers_test() ->
+	Test = fun() ->
+		Peers = helper_start_mock_peers(2),
+		Value = do_request_sequential({test, 5}, 3000, Peers),
+		helper_stop_mock_peers(Peers),
+		Value
+	end,
+	{timeout, 10, ?assertMatch(
+		{nopeers, 5}, Test()
+	)}.
+
+send_broadcast_ok_test() ->
+	Peers = helper_start_mock_peers(?MAX_PARALLEL_REQUESTS*2),
+	Result = lists:foldr(
+		fun({_IP, _Port, _Pid, PeerID}, Acc) when PeerID == <<1>> ->
+				Acc; % should be timed out, so exclude it from the result
+			({_IP, _Port, _Pid, PeerID}, Acc) when PeerID == <<2>> ->
+				Acc; % should be an error, exclude it either
+			({_IP, _Port, _Pid, PeerID}, Acc) ->
+				[{PeerID, value} | Acc]
+		end,
+	[], Peers),
+	Test = fun() ->
+		Value = do_request_broadcast({test, value}, length(Peers), 3000, Peers),
+		helper_stop_mock_peers(Peers),
+		lists:sort(Value)
+	end,
+	{timeout, 10, ?assertMatch(
+		Result, Test()
+	)}.
+
+send_broadcast_nopeers_test() ->
+	{timeout, 10, ?assertMatch(
+		{nopeers, [], value}, do_request_broadcast({test, value}, 1, 3000, [])
+	)}.
+
+send_parallel_test() ->
+	Args = lists:seq(200,210),
+	Test = fun() ->
+		Peers = helper_start_mock_peers(?MAX_PARALLEL_REQUESTS*2),
+		Value = do_request_parallel({test, Args}, 3000, Peers),
+		helper_stop_mock_peers(Peers),
+		Value
+	end,
+	Result = lists:foldl(fun(A,Map) ->
+		maps:put(A,A,Map)
+	end, #{}, Args),
+	{timeout, 10, ?assertMatch(
+		Result, Test()
+	)}.
+
+send_parallel_nopeers_test() ->
+	Args = lists:seq(200,210),
+	Test = fun() ->
+		Peers = helper_start_mock_peers(2),
+		Value = do_request_parallel({test, Args}, 3000, Peers),
+		helper_stop_mock_peers(Peers),
+		Value
+	end,
+	{timeout, 10, ?assertMatch(
+		{nopeers, #{}, Args}, Test()
+	)}.
+
+send_affinity_test() ->
+	Args = lists:map(fun(A) ->
+		{<<A>>, A}
+	end, lists:seq(1,10)),
+	Result = lists:foldl(fun(1,Map) ->
+			maps:put(<<1>>,error, Map);
+		(2, Map) ->
+			maps:put(<<2>>,error, Map);
+		(A, Map) ->
+			maps:put(<<A>>,A, Map)
+	end, #{}, lists:seq(1,10)),
+	case ets:info(?MODULE) of
+		undefined ->
+			ets:new(?MODULE, [set, public, named_table]);
+		_ ->
+			ok
+	end,
+	Test = fun() ->
+		Peers = helper_start_mock_peers(?MAX_PARALLEL_REQUESTS*2),
+		lists:map(fun({IP, Port, Pid, PeerID}) ->
+			ets:insert(?MODULE, {{IP,Port}, Pid, 0, PeerID})
+		end, Peers),
+		Value = do_request_affinity({test, Args}, 3000),
+		helper_stop_mock_peers(Peers),
+		Value
+	end,
+	{timeout, 10, ?assertMatch(
+		Result, Test()
+	)}.
+
+send_affinity_nopeers_test() ->
+	case ets:info(?MODULE) of
+		undefined ->
+			ets:new(?MODULE, [set, public, named_table]);
+		_ ->
+			ok
+	end,
+	Args = lists:map(fun(A) ->
+		{<<A>>, A}
+	end, lists:seq(1000,1010)),
+	Result = lists:foldl(fun(A, Map) ->
+			maps:put(<<A>>,error, Map)
+	end, #{}, lists:seq(1000,1010)),
+	Test = fun() ->
+		Peers = helper_start_mock_peers(?MAX_PARALLEL_REQUESTS*2),
+		lists:map(fun({IP, Port, Pid, PeerID}) ->
+			ets:insert(?MODULE, {{IP,Port}, Pid, 0, PeerID})
+		end, Peers),
+		Value = do_request_affinity({test, Args}, 3000),
+		helper_stop_mock_peers(Peers),
+		Value
+	end,
+	{timeout, 10, ?assertMatch(
+		Result, Test()
+	)}.
+
+
+helper_start_mock_peers(N) ->
+	PeerProcess = fun(PeerID, PeerProcess) ->
+		receive
+			stop ->
+				ok;
+			{'$gen_call', {_From, _Ref}, {request, test, _V}} when PeerID == <<1>> ->
+				% lets the first peer returns nothin for all the cases
+				PeerProcess(PeerID, PeerProcess);
+			{'$gen_call', {From, Ref}, {request, test, _V}} when PeerID == <<2>> ->
+				% lets the second peer returns wrong result
+				From ! {Ref, error},
+				PeerProcess(PeerID, PeerProcess);
+
+			{'$gen_call', {From, Ref}, {request, test, V}} ->
+				From ! {Ref, {result, V}},
+				PeerProcess(PeerID, PeerProcess);
+			_Unknown ->
+				PeerProcess(PeerID, PeerProcess)
+			after 5000 ->
+				ok
+		end
+	end,
+	lists:map(fun(I) ->
+		%{IP, Port, Pid, PeerID}
+		Pid = spawn(fun() -> PeerProcess(<<I>>, PeerProcess) end),
+		{<<I,I,I,I>>, 1984, Pid, <<I>>}
+	end, lists:seq(1,N)).
+
+helper_stop_mock_peers(Peers) ->
+	lists:map(fun({_IP, _Port, Pid, _PeerID}) ->
+		Pid ! stop
+	end, Peers).
 
