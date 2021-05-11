@@ -36,9 +36,11 @@ start_test_application(RewardAddress) ->
 	end,
 	ok = application:set_env(arweave, config, Config#config{
 		mining_addr = RewardAddress,
-		disable = Disable
+		disable = Disable,
+		debug = true
 	}),
 	{ok, _} = application:ensure_all_started(arweave, permanent),
+	wait_for_node_ready(),
 	ok.
 
 stop_test_application() ->
@@ -47,35 +49,19 @@ stop_test_application() ->
 	%% Do not stop dependencies.
 	os:cmd("rm -r " ++ Config#config.data_dir ++ "/*").
 
-start_peering(Node, Peer) ->
-	ct_rpc_call_strict(Node, ar_test_lib, start_peering, [Peer]).
+start_peering({Peer, Port, Options}) ->
+	gen_server:call(ar_network, {peering, Peer, Port, Options}),
+	wait_for_network_connection(true).
 
-start_peering(Peer) ->
-	%% Connect the nodes by making two HTTP calls.
-	%%
-	%% After a request to a peer, the peer is recorded in ar_meta_db but
-	%% not in the remote peer list. So we need to remove it from ar_meta_db
-	%% otherwise it's not added to the remote peer list when it makes a request
-	%% to us in turn.
+start_peering(Node, Peer) ->
+	% get the port number of the remote peer
+	{ok, PeerConfig} = ct_rpc_call_strict(Node, application, get_env, [arweave, config]),
+	% start peering local -> remote
+	start_peering({ Peer, PeerConfig#config.port, [{sleep_time, 0}] }),
+	% start peering remote -> local
 	{ok, Config} = application:get_env(arweave, config),
-	Port = Config#config.port,
-	ct_rpc_call_strict(Peer, ar_meta_db, reset_peer, [{127, 0, 0, 1, Port}]),
-	PeerPort = ct_rpc_call_strict(Peer, ar_meta_db, get, [port]),
-	{ok, {{<<"200">>, <<"OK">>}, _, _, _, _}} =
-		ar_http:req(#{
-			method => get,
-			peer => {127, 0, 0, 1, PeerPort},
-			path => "/info",
-			headers => [{<<"X-P2p-Port">>, integer_to_binary(Port)}]
-		}),
-	ar_meta_db:reset_peer({127, 0, 0, 1, PeerPort}),
-	{ok, {{<<"200">>, <<"OK">>}, _, _, _, _}} =
-		ar_http:req(#{
-			method => get,
-			peer => {127, 0, 0, 1, Port},
-			path => "/info",
-			headers => [{<<"X-P2p-Port">>, integer_to_binary(PeerPort)}]
-		}).
+	ct_rpc_call_strict(Node, ar_test_lib, start_peering, [{Peer, Config#config.port, [{sleep_time,0}] }]).
+
 
 post_txs_and_mine(Node, TXs) when is_list(TXs) ->
 	ct_rpc_call_strict(Node, ar_test_lib, post_txs_and_mine, [TXs]).
@@ -111,6 +97,18 @@ post_tx(TX) ->
 			),
 			noop
 	end.
+
+wait_for_node_ready() ->
+	ok = ar_util:do_until(
+		fun() ->
+			case ar_node:is_joined() of
+				true -> ok;
+				_ -> false
+			end
+		end,
+		300,
+		10000
+	).
 
 wait_for_block(Node, Height) ->
 	ct_rpc_call_strict(Node, ar_test_lib, wait_for_block, [Height]).
@@ -176,6 +174,19 @@ wait_for_chunks([{EndOffset, Proof} | Proofs]) ->
 		120 * 1000
 	),
 	wait_for_chunks(Proofs).
+
+wait_for_network_connection(Connected) when is_boolean(Connected) ->
+	ok = ar_util:do_until(
+		fun() ->
+			case ar_network:is_connected() of
+				Connected -> ok;
+				_ -> false
+			end
+		end,
+		300,
+		10000
+	).
+
 
 get_chunk(Offset) ->
 	{ok, Config} = application:get_env(arweave, config),

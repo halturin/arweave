@@ -29,9 +29,10 @@
 -include_lib("arweave/include/ar_config.hrl").
 
 -record(state, {
-	mined_blocks,
+	mined_blocks = maps:new(),
 	no_foreign_blocks_timer,
-	miner_logging = false
+	miner_logging = false,
+	connected = false
 }).
 
 %%%===================================================================
@@ -77,18 +78,23 @@ start_link() ->
 %%--------------------------------------------------------------------
 init([]) ->
 	process_flag(trap_exit, true),
-	MinerLogging =
-		case ar_meta_db:get(miner_logging) of
-			false -> false;
-			_ -> true
-		end,
-	{ok, Timer} = timer:send_after(?FOREIGN_BLOCK_ALERT_TIME, self(), no_foreign_blocks),
-	State = #state{
-		mined_blocks = maps:new(),
-		miner_logging = MinerLogging,
-		no_foreign_blocks_timer = Timer
-	},
-	{ok, State}.
+	{ok, Config} = application:get_env(arweave, config),
+	MinerLogging = lists:member(miner_logging, Config#config.enable),
+	ok = ar_events:subscribe(network),
+	case ar_network:is_connected() of
+		true ->
+			{ok, Timer} = timer:send_after(?FOREIGN_BLOCK_ALERT_TIME, ?MODULE, no_foreign_blocks),
+			{ok, #state{
+				miner_logging = MinerLogging,
+				no_foreign_blocks_timer = Timer,
+				connected = true
+			}};
+		false ->
+			{ok, #state{
+				miner_logging = MinerLogging,
+				connected = false
+			}}
+	end.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -167,7 +173,7 @@ handle_cast({mined_block, BH, Height}, State) ->
 
 handle_cast({foreign_block, _BH}, #state{ no_foreign_blocks_timer = Timer } = State) ->
 	{ok, cancel} = timer:cancel(Timer),
-	{ok, Timer2} = timer:send_after(?FOREIGN_BLOCK_ALERT_TIME, self(), no_foreign_blocks),
+	{ok, Timer2} = timer:send_after(?FOREIGN_BLOCK_ALERT_TIME, ?MODULE, no_foreign_blocks),
 	{noreply, State#state{ no_foreign_blocks_timer = Timer2 }};
 
 handle_cast(Msg, State) ->
@@ -184,13 +190,21 @@ handle_cast(Msg, State) ->
 %%									 {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_info(no_foreign_blocks, State) ->
+handle_info({event, network, connected}, State) ->
+	{ok, Timer} = timer:send_after(?FOREIGN_BLOCK_ALERT_TIME, ?MODULE, no_foreign_blocks),
+	{noreply, State#state{ no_foreign_blocks_timer = Timer, connected = true }};
+
+handle_info({event, network, disconnected}, #state{ no_foreign_blocks_timer = Timer } = State) ->
+	timer:cancel(Timer),
+	{noreply, State#state{connected = false}};
+
+handle_info(no_foreign_blocks, State) when State#state.connected ->
 	Message =
 		"No foreign blocks received from the network or found by trusted peers. "
 		"Please check your internet connection and the logs for errors.",
 	?LOG_WARNING(Message),
 	ar:console("~s~n", [Message]),
-	{ok, Timer} = timer:send_after(?FOREIGN_BLOCK_ALERT_TIME, self(), no_foreign_blocks),
+	{ok, Timer} = timer:send_after(?FOREIGN_BLOCK_ALERT_TIME, ?MODULE, no_foreign_blocks),
 	{noreply, State#state{ no_foreign_blocks_timer = Timer }};
 
 handle_info({'EXIT', _Pid, normal}, State) ->

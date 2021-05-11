@@ -389,7 +389,7 @@ check_get_top_n_get_banned(_Config) ->
 		peerC => {1,undefined,1984},
 		peerI => {1000,undefined,1984}
 	},
-	Banned = ar_rating:get_banned(),
+	X = ar_rating:get_banned(),
 
 	% get peer info {Rating, Banned, Host, Port, online|offline}.
 	{100, 0, undefined, 1984, online} = ar_rating:get(peerA),

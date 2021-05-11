@@ -247,6 +247,12 @@ init([]) ->
 %%									 {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+%%
+%% for the testing purposes we should be able to start peering manualy
+handle_call({peering, {A,B,C,D}, Port, Options}, _From, State) ->
+	P = peering({A,B,C,D}, Port, Options),
+	{reply, P, State};
+
 handle_call(Request, _From, State) ->
 	?LOG_ERROR([{event, unhandled_call}, {request, Request}]),
 	{reply, ok, State}.
@@ -265,6 +271,15 @@ handle_cast(join, State) ->
 	?LOG_DEBUG("Network joining..."),
 	{ok, Config} = application:get_env(arweave, config),
 	case peers_joined() of
+		[] when length(Config#config.peers) == 0 ->
+			% This is the very first node in the network.
+			% It doesn't have trusted peers, so we go to
+			% the peering right away and set the network state
+			% as 'connected' to start all the rest processes
+			% are depending on the network.
+			ar_events:send(network, connected),
+			gen_server:cast(?MODULE, peering),
+			{noreply, State};
 		Peers when length(Peers) < length(Config#config.peers) ->
 			lists:map(fun({A,B,C,D,Port}) ->
 				% Override default PEER_SLEEP_TIME for the trusted peers.
@@ -289,8 +304,10 @@ handle_cast(_Msg, State)  when State#state.ready == false ->
 	{noreply, State};
 handle_cast(peering, State) ->
 	?LOG_DEBUG("Network peering..."),
+	{ok, Config} = application:get_env(arweave, config),
 	case peers_joined() of
-		[] ->
+		[] when length(Config#config.peers) > 0 ->
+			% Start joining process only if we have trusted peers
 			gen_server:cast(?MODULE, join),
 			prometheus_gauge:set(arweave_peer_count, 0),
 			{noreply, State#state{peering_timer = undefined}};
@@ -323,19 +340,29 @@ handle_cast(peering, State) ->
 			end, {[],#{}}, lists:append(RatedPeers,OfflinePeers) ),
 			% get random cadidate N times from Candidates list
 			% and start peering process with choosen peer
-			lists:foldl(fun(_, []) ->
-				% not enough cadidates to reach the limit of PEERS_JOINED_MAX
-				[];
-			(_, C) ->
-				Nth = rand:uniform(length(C)),
-				{C1,[{IP,Port}|C2]} = lists:split(Nth - 1, C),
-				peering(IP, Port, []),
-				lists:append(C1,C2)
-			end, Candidates, lists:seq(1,N) ),
-			% go further
-			prometheus_gauge:set(arweave_peer_count, length(Peers)),
-			{ok, T} = timer:send_after(10000, {'$gen_cast', peering}),
-			{noreply, State#state{peering_timer = T}};
+			case length(Candidates) of
+				0 ->
+					% No candidates. Wait a bit. This case could happen
+					% if we have no trusted peers (Config#config.peers is empty).
+					% Just wait until at least one candidate will be registered
+					% on trying to peer with us.
+					{ok, T} = timer:send_after(500, {'$gen_cast', peering}),
+					{noreply, State#state{peering_timer = T}};
+				_ ->
+					lists:foldl(fun(_, []) ->
+						% not enough cadidates to reach the limit of PEERS_JOINED_MAX
+						[];
+					(_, C) ->
+						Nth = rand:uniform(length(C)),
+						{C1,[{IP,Port}|C2]} = lists:split(Nth - 1, C),
+						peering(IP, Port, []),
+						lists:append(C1,C2)
+					end, Candidates, lists:seq(1,N) ),
+					% go further
+					prometheus_gauge:set(arweave_peer_count, length(Peers)),
+					{ok, T} = timer:send_after(10000, {'$gen_cast', peering}),
+					{noreply, State#state{peering_timer = T}}
+			end;
 		Peers ->
 			?LOG_DEBUG("Network peering. Do nothing"),
 			prometheus_gauge:set(arweave_peer_count, length(Peers)),
@@ -360,10 +387,10 @@ handle_info({event, node, ready}, State) when is_reference(State#state.peering_t
 	% already started self casting with 'peering' message.
 	{noreply, State};
 handle_info({event, node, ready}, State) ->
-	?LOG_DEBUG("Network. Start peering..."),
-	gen_server:cast(?MODULE, peering),
 	%% Now we can serve incoming requests. Start the HTTP server.
 	ok = ar_http_iface_server:start(),
+	?LOG_DEBUG("Network. Start peering..."),
+	gen_server:cast(?MODULE, peering),
 	{noreply, State#state{ready = true}};
 handle_info({event, node, Reason}, State) ->
 	% Reason could be 'worker_terminated', so we should restart the peering
@@ -874,7 +901,6 @@ send_affinity_nopeers_test() ->
 	{timeout, 10, ?assertMatch(
 		Result, Test()
 	)}.
-
 
 helper_start_mock_peers(N) ->
 	PeerProcess = fun(PeerID, PeerProcess) ->

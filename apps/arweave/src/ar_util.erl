@@ -8,7 +8,6 @@
 	pmap/2,
 	do_until/3,
 	block_index_entry_from_block/1, get_block_index_intersection/2,
-	reset_peer/1, get_performance/1, update_timer/1,
 	bytes_to_mb_string/1
 ]).
 
@@ -134,7 +133,7 @@ genesis_wallets() ->
 		fun(Line) ->
 			[PubKey, RawQty] = string:tokens(Line, ","),
 			{
-				ar_wallet:to_address(ar_util:decode(PubKey)),
+				ar_wallet:to_address(decode(PubKey)),
 				erlang:trunc(math:ceil(list_to_integer(RawQty))) * ?WINSTON_PER_AR,
 				<<>>
 			}
@@ -191,39 +190,15 @@ block_index_contains_block([_ | BI], BH, Height) ->
 block_index_contains_block([], _BH, _Height) ->
 	false.
 
-%% @doc Reset the performance data for a given peer.
-reset_peer(Peer = {_, _, _, _, _}) ->
-	ar_meta_db:put({peer, Peer}, #performance{}).
-
-%% @doc Return the performance object for a node.
-get_performance(Peer = {_, _, _, _, _}) ->
-	case ar_meta_db:get({peer, Peer}) of
-		not_found -> #performance{};
-		P -> P
-	end.
-
-%% @doc Update the "last on list" timestamp of a given peer
-update_timer(Peer = {_, _, _, _, _}) ->
-	case ar_meta_db:get({peer, Peer}) of
-		not_found -> #performance{};
-		P ->
-			ar_meta_db:put({peer, Peer},
-				P#performance {
-					transfers = P#performance.transfers,
-					time = P#performance.time ,
-					bytes = P#performance.bytes,
-					timestamp = os:system_time(seconds)
-				}
-			)
-	end.
-
 %% @doc Convert the given number of bytes into the "%s MiB" string.
 bytes_to_mb_string(Bytes) ->
 	integer_to_list(Bytes div 1024 div 1024) ++ " MiB".
 
 %%%
-%%% Tests.
+%%% Unit-tests
 %%%
+
+-include_lib("eunit/include/eunit.hrl").
 
 %% @doc Test that unique functions correctly.
 basic_unique_test() ->
@@ -256,3 +231,168 @@ pmap_test() ->
 		X * 2
 	end,
 	?assertEqual([6, 2, 4], pmap(Mapper, [3, 1, 2])).
+
+
+%%% The compatibility tests to assert the used
+%%% Base64URL encoding and decoding functions are
+%%% compatible with base64url 1.0.1.
+back_to_back_encode_test() ->
+	Inputs = [
+		42,
+		foo,
+		"foo",
+		{foo},
+		<< "zany" >>,
+		<< "zan"  >>,
+		<< "za"   >>,
+		<< "z"	>>,
+		<<		>>,
+		binary:copy(<<"0123456789">>, 100000)
+	],
+	lists:foreach(
+		fun(Input) ->
+			io:format("Running input: ~p...~n", [Input]),
+			assert_encode(Input)
+		end,
+		Inputs
+	).
+
+
+back_to_back_decode_test_() ->
+	{timeout, 10, fun test_back_to_back_decode/0}.
+
+test_back_to_back_decode() ->
+	Inputs = [
+		42,
+		foo,
+		"foo",
+		{foo},
+		<< "." >>,
+		<< "+" >>,
+		<< "!" >>,
+		<< "/" >>,
+		<< "Σ">>,
+		<< "a" >>,
+		<< "aa" >>,
+		<< "aaa" >>,
+		<< "aaaa" >>,
+		<< "aaaaa" >>,
+		<< "aaaaaa" >>,
+		<< "aaaaaaa" >>,
+		<< "aaaaaaaa" >>,
+		<< "aaaaaaaaa" >>,
+		<< "aaaaaaaaaa" >>,
+		<< "!~[]" >>,
+		<< "emFueQ==" >>,
+		<< "emFu"	 >>,
+		<< "emE="	 >>,
+		<< "eg=="	 >>,
+		<<			>>,
+		<< " emFu" >>,
+		<< "em Fu" >>,
+		<< "emFu " >>,
+		<< "	"  >>,
+		<< "   ="  >>,
+		<< "  =="  >>,
+		<< "=   "  >>,
+		<< "==  "  >>,
+		<< "\temFu">>,
+		<< "\tem  F  u">>,
+		<< "em  F  \t u">>,
+		<< "em  F  \tu">>,
+		<< "e\nm\nF\nu\n" >>,
+		<< "e\nm\nF\nu" >>,
+		<< "e\nm\nF\nu " >>,
+		<< "AAAA" >>,
+		<< "AAA=" >>,
+		<< "AAAA=" >>,
+		<< "AAA"  >>,
+		<< "AA==" >>,
+		<< "AA="  >>,
+		<< "AA"   >>,
+		<< "A=="  >>,
+		<< "A="   >>,
+		<< "A"	>>,
+		<< "=="   >>,
+		<< "="	>>,
+		<< "=a"   >>,
+		<< "==a"  >>,
+		<< "===a" >>,
+		<< "====a" >>,
+		<< "=====a" >>,
+		<< "=======a" >>,
+		<< "========a" >>,
+		<<		>>,
+		<<"PDw/Pz8+Pg==">>,
+		<<"PDw:Pz8.Pg==">>,
+		binary:copy(<<"a">>, 1000000),
+		binary:copy(<<"a">>, 1000001),
+		binary:copy(<<"a">>, 1000002),
+		binary:copy(<<"a">>, 1000003),
+		binary:copy(<<"a">>, 1000004),
+		binary:copy(<<"a">>, 1000005),
+		binary:copy(<<"a">>, 1000006),
+		binary:copy(<<"a">>, 1000007),
+		binary:copy(<<"a">>, 1000008),
+		binary:copy(<<"a">>, 1000009),
+		binary:copy(<<"0123456789">>, 100000),
+		binary:copy(<<"0123456789_-">>, 100000)
+	],
+	lists:foreach(
+		fun(Input) ->
+			io:format("Running input: ~p...~n", [Input]),
+			assert_decode(Input)
+		end,
+		Inputs
+	).
+
+assert_encode(Input) ->
+	case catch encode_int(Input) of
+		{'EXIT', {badarg, _}} ->
+			?assertException(error, badarg, encode(Input));
+		{'EXIT', {function_clause, _}} ->
+			?assertException(error, badarg, encode(Input));
+		{'EXIT', {badarith, _}} ->
+			?assertException(error, badarg, encode(Input));
+		Output ->
+			?assertEqual(Output, encode(Input))
+	end.
+
+assert_decode(Input) ->
+	case catch decode_int(Input) of
+		{'EXIT', {badarg, _}} ->
+			?assertException(error, badarg, decode(Input));
+		{'EXIT', {function_clause, _}} ->
+			?assertException(error, badarg, decode(Input));
+		{'EXIT', {badarith, _}} ->
+			?assertException(error, badarg, decode(Input));
+		Output ->
+			?assertEqual(Output, decode(Input))
+	end.
+
+encode_int(Bin) when is_binary(Bin) ->
+    << << (urlencode_digit(D)) >> || <<D>> <= base64:encode(Bin), D =/= $= >>;
+encode_int(L) when is_list(L) ->
+    encode_int(iolist_to_binary(L));
+encode_int(_) ->
+    error(badarg).
+
+decode_int(Bin) when is_binary(Bin) ->
+    Bin2 = case byte_size(Bin) rem 4 of
+        2 -> << Bin/binary, "==" >>;
+        3 -> << Bin/binary, "=" >>;
+        _ -> Bin
+    end,
+    base64:decode(<< << (urldecode_digit(D)) >> || <<D>> <= Bin2 >>);
+decode_int(L) when is_list(L) ->
+    decode(iolist_to_binary(L));
+decode_int(_) ->
+    error(badarg).
+
+urlencode_digit($/) -> $_;
+urlencode_digit($+) -> $-;
+urlencode_digit(D)  -> D.
+
+urldecode_digit($_) -> $/;
+urldecode_digit($-) -> $+;
+urldecode_digit(D)  -> D.

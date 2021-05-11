@@ -5,7 +5,6 @@
 	{applications, [
 		kernel,
 		stdlib,
-		sasl,
 		os_mon,
 		gun,
 		cowlib,

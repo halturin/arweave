@@ -55,7 +55,6 @@ init([]) ->
 		?CHILD(ar_arql_db, worker),
 		?CHILD(ar_events_sup, supervisor),
 		?CHILD(ar_rating, worker),
-		?CHILD(ar_node_join, worker),
 		?CHILD(ar_network_sup, supervisor),
 		?CHILD(ar_network_handler_sup, supervisor, [?DEFAULT_COMMON_HANDLERS]),
 		?CHILD(ar_watchdog, worker),
@@ -64,5 +63,7 @@ init([]) ->
 		?CHILD(ar_header_sync, worker),
 		?CHILD(ar_data_sync, worker),
 		?CHILD(ar_node_worker, worker),
-		?CHILD(ar_poller, worker)
+		?CHILD(ar_poller, worker),
+		% Joining to the Arweave network once all the processes are ready
+		?CHILD(ar_node_join, worker)
 	]}}.

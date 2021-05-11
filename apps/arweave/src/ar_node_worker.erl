@@ -194,6 +194,7 @@ handle_info({event, network, disconnected}, State) ->
 	{noreply, State};
 
 handle_info({event, node, {joined, BI, Blocks}}, State) ->
+	?LOG_DEBUG("Starting wallets..."),
 	{ok, _} = ar_wallets:start_link([{blocks, Blocks}]),
 	ets:insert(node_state, [
 		{block_index,	BI},
@@ -275,7 +276,7 @@ handle_info({event, block, {mined, Block, TXs, CurrentBH}}, State) ->
 	end;
 
 %% @doc Add the new waiting transaction to the server state.
-handle_info({event, tx, {add, TX, _FromPeerID}}, State) ->
+handle_info({event, tx, {new, TX, _FromPeerID}}, State) ->
 	[{mempool_size, MempoolSize}] = ets:lookup(node_state, mempool_size),
 	[{tx_statuses, Map}] = ets:lookup(node_state, tx_statuses),
 	case maps:is_key(TX#tx.id, Map) of
@@ -322,6 +323,7 @@ handle_info({event, tx, {drop, DroppedTXs}}, State) ->
 	{noreply, State};
 
 handle_info(wallets_ready, State) ->
+	?LOG_DEBUG("Node is ready"),
 	[{block_index, BI}] = ets:lookup(node_state, block_index),
 	[{joined_blocks, Blocks}] = ets:lookup(node_state, joined_blocks),
 	ar_header_sync:join(BI, Blocks),

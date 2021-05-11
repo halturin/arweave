@@ -226,6 +226,7 @@ handle_cast({write_wallet_list_chunk, RootHash, Cursor, Position}, DAG) ->
 	{noreply, DAG};
 
 handle_cast({init, Blocks}, _) ->
+	?LOG_DEBUG("Initializing wallet: ~p", [Blocks]),
 	InitialDepth = ?STORE_BLOCKS_BEHIND_CURRENT,
 	{DAG3, LastB, PrevWalletList} = lists:foldl(
 		fun (B, start) ->

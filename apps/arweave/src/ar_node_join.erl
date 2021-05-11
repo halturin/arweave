@@ -132,17 +132,17 @@ handle_cast(join, State) ->
 			gen_server:cast(?MODULE, joining),
 			{noreply, State#state{joining = true}};
 		{[#block{} = GenesisB], true} ->
+			?LOG_DEBUG("Node joined"),
 			BI = [ar_util:block_index_entry_from_block(GenesisB)],
-			ar_node_state:init(BI),
 			ar_events:send(node, {joined, BI, [GenesisB]}),
-			{stop, normal, State};
+			{noreply, State};
 		{BI, true} ->
-			ar_node_state:init(BI),
+			?LOG_DEBUG("Node joined"),
 			Blocks = read_recent_blocks(BI),
 			ar_events:send(node, {joined, BI, Blocks}),
-			{stop, normal, State};
+			{noreply, State};
 		{_, false} ->
-			{stop, normal, State}
+			{noreply, State}
 	end;
 
 handle_cast(joining, State) when State#state.connected == false ->
@@ -201,10 +201,12 @@ handle_cast({trail_blocks, Behind, B, BI}, State) when Behind == 0; B#block.heig
 	%ar_node_state:init(BI),
 	ar_randomx_state:init(BI),
 	% restore the block order
-	Blocks = lists:reverse(State#state.blocks),
-	ar_events:send(node, {joined, BI, Blocks}),
+	SizeTaggedTXs = ar_block:generate_size_tagged_list_from_txs(B#block.txs),
+	Blocks = [B#block{ size_tagged_txs = SizeTaggedTXs } | State#state.blocks],
+	Blocks1 = lists:reverse(Blocks),
+	ar_events:send(node, {joined, BI, Blocks1}),
 	ar:console("Joined the Arweave network successfully.~n"),
-	{noreply, State#state{blocks = Blocks}};
+	{noreply, State#state{blocks = Blocks1}};
 
 handle_cast({trail_blocks, Behind, B, BI}, State) when ?IS_BLOCK(B) ->
 	?LOG_DEBUG("Node joining. Trailing block ~p...", [Behind]),

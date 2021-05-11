@@ -196,7 +196,7 @@ groups() ->
 			network_join_leave_stateless,
 			network_join_leave_stateful
 		]}
-    ].
+	].
 
 %%--------------------------------------------------------------------
 %% Function: all() -> GroupsAndTestCases | {skip, Reason}

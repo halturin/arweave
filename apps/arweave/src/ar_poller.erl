@@ -98,6 +98,7 @@ handle_call(Request, _From, State) ->
 %%--------------------------------------------------------------------
 handle_cast(poll, State) when not State#state.connected ->
 	timer:cancel(State#state.poll_timer),
+	?LOG_DEBUG("Block polling paused. Waiting for the network..."),
 	{noreply, State};
 handle_cast(poll, State) when not State#state.joined->
 	timer:cancel(State#state.poll_timer),
