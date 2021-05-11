@@ -65,7 +65,7 @@ init([]) ->
 		joined = ar_node:is_joined(),
 		connected = ar_network:is_connected(),
 		last_seen_height = -1,
-		interval = Config#config.polling
+		interval = Config#config.polling * 1000
 	}}.
 
 %%--------------------------------------------------------------------

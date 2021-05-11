@@ -85,7 +85,19 @@ broadcast(tx, TX, {ExcludePeers, Max}) ->
 
 %% @doc
 %% add_peer_candidate adds a record with given IP address and Port number for the
-%% future peering. Ignore private networks.
+%% future peering. Ignore private networks (except the DEBUG mode)
+-ifdef(DEBUG).
+add_peer_candidate({A,B,C,D} = IP, Port) when Port > 0, Port < 65536,
+											A > 0, A < 256,
+											B > -1, B < 256,
+											C > -1, C < 256,
+											D > -1, D < 256 ->
+	% do not overwrite if its already exist
+	% {{IP,Port}, Pid, Timestamp, PeerID}
+	ets:insert_new(?MODULE, {{IP, Port}, undefined, undefined, undefined});
+%% ignore any garbage
+add_peer_candidate(_IP, _Port) -> false.
+-else.
 add_peer_candidate({192,168,_,_}, _Port) -> false;
 add_peer_candidate({169,254,_,_}, _Port) -> false;
 add_peer_candidate({172,X,_,_}, _Port) when X > 15, X < 32 -> false; % 172.16..172.31
@@ -102,7 +114,7 @@ add_peer_candidate({A,B,C,D} = IP, Port) when Port > 0, Port < 65536,
 	ets:insert_new(?MODULE, {{IP, Port}, undefined, undefined, undefined});
 %% ignore any garbage
 add_peer_candidate(_IP, _Port) -> false.
-
+-endif.
 %% @doc
 %% Returns whether the node is connected to the network or not.
 %% true - has at least one peering connection
@@ -342,6 +354,7 @@ handle_cast(peering, State) ->
 			% and start peering process with choosen peer
 			case length(Candidates) of
 				0 ->
+					?LOG_DEBUG("No candidates for peering"),
 					% No candidates. Wait a bit. This case could happen
 					% if we have no trusted peers (Config#config.peers is empty).
 					% Just wait until at least one candidate will be registered
