@@ -16,7 +16,12 @@
 	code_change/3
 ]).
 
--export([set_pause/1, show_queue/0, drop_tx/1]).
+-export([
+	set_pause/1,
+	show_queue/0,
+	drop_tx/1,
+	utility/1
+]).
 
 
 -include_lib("arweave/include/ar.hrl").
@@ -29,8 +34,7 @@
 	max_data_size = ?TX_QUEUE_DATA_SIZE_LIMIT,
 	header_size = 0,
 	data_size = 0,
-	paused = false,
-	process_timer
+	paused = false
 }).
 
 
@@ -72,6 +76,8 @@ start_link() ->
 %% @end
 %%--------------------------------------------------------------------
 init([]) ->
+	ar_events:subscribe(tx),
+	gen_server:cast(?MODULE, process_queue),
 	{ok, #state{}}.
 
 %%--------------------------------------------------------------------
@@ -88,9 +94,11 @@ init([]) ->
 %%									 {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_call({set_pause, false}, _From, State) when State#state.paused == true ->
+	gen_server:cast(?MODULE, process_queue),
+	{reply, ok, State#state{paused = false}};
 handle_call({set_pause, true}, _From, State) ->
-	timer:cancel(State#state.process_timer),
-	{reply, ok, State#state{ paused = true, process_timer = undefined}};
+	{reply, ok, State#state{paused = true}};
 
 handle_call(show_queue, _From, State) ->
 	Reply = show_queue(State#state.tx_queue),
@@ -132,10 +140,9 @@ handle_call(Request, _From, State) ->
 handle_cast(_Msg, State) when State#state.paused ->
 	{noreply, State};
 
-handle_cast(_Msg, State) when State#state.tx_queue == {0, nil} ->
+handle_cast(process_queue, State) when State#state.tx_queue == {0, nil} ->
 	?LOG_DEBUG("TX Queue is empty. Waiting..."),
-	{ok, T} = timer:send_after(5000, {'$gen_cast', process_queue}),
-	{noreply, State#state{process_timer = T}};
+	{noreply, State};
 
 handle_cast(process_queue, State) ->
 	?LOG_DEBUG("TX Queue process..."),
@@ -146,21 +153,21 @@ handle_cast(process_queue, State) ->
 	} = State,
 	{{_, {TX, {TXHeaderSize, TXDataSize}, FromPeerID}}, NewQ} = gb_sets:take_largest(Q),
 	ExcludePeers = #{FromPeerID => true},
-	?LOG_DEBUG("TX Queue broadcast TXID ~p (exclude ~p)", [TX, FromPeerID]),
-	BroadcastingStartedAt = erlang:timerstamp(),
+	BroadcastingStartedAt = erlang:timestamp(),
+	?LOG_DEBUG("TX Queue broadcast TXID ~p (exclude ~p)", [ar_util:encode(TX#tx.id), ExcludePeers]),
 	ar_network:broadcast(tx, TX, {ExcludePeers, ?PEERS_JOINED_MAX}),
 	BroadcastingTimeUs = timer:now_diff(erlang:timestamp(), BroadcastingStartedAt),
 	record_propagation_rate(tx_propagated_size(TX), BroadcastingTimeUs),
 	record_queue_size(gb_sets:size(NewQ)),
-	gen_server:cast(?MODULE, process_queue),
 	% compute the delay we should wait before the sending this TX to the mining pool
 	Delay = ar_node_utils:calculate_delay(tx_propagated_size(TX)),
-	timer:send_after(Delay, {'$gen_cast', {send_to_mining_pool, TX}}),
+	erlang:send_after(Delay, ?MODULE, {'$gen_cast', {send_to_mining_pool, TX}}),
 	NewState = State#state{
 		tx_queue = NewQ,
 		header_size = HeaderSize - TXHeaderSize,
 		data_size = DataSize - TXDataSize
 	},
+	gen_server:cast(?MODULE, process_queue),
 	{noreply, NewState};
 
 handle_cast({send_to_mining_pool, TX}, State) ->
@@ -229,7 +236,11 @@ handle_info({event, tx, {new, TX, FromPeerID}}, State) ->
 		header_size = NewHeaderSize,
 		data_size = NewDataSize
 	},
+	gen_server:cast(?MODULE, process_queue),
 	{noreply, NewState};
+
+handle_info({event, tx, {_, _TX, _FromPeerID}}, State) ->
+	{noreply, State};
 
 handle_info(Info, State) ->
 	?LOG_ERROR([{event, unhandled_info}, {info, Info}]),

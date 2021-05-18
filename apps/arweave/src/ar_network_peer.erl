@@ -285,6 +285,8 @@ handle_cast(Msg, State) ->
 %%									 {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_info({'EXIT',_From, Reason}, State) ->
+	{stop, Reason, State};
 handle_info({gun_down,_,http,_,_,_}, State) ->
 	% ignore http client artifact
 	{noreply, State};
@@ -323,7 +325,14 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 validate_network(Info, State) ->
-	PeerID = list_to_binary(lists:flatten(io_lib:format("~p",[State#state.peer_ipport]))),
+	PeerID = case proplists:get_value(id, Info) of
+		undefined ->
+			% if you change this format, please update ar_http_util:arweave_peer as well
+			list_to_binary(lists:flatten(io_lib:format("~p",[State#state.peer_ipport])));
+		ID ->
+			% implement ID validation later
+			ID
+	end,
 	% make sure if this node hasn't been banned earlier
 	Banned = ar_rating:get_banned(),
 	HasBanned = maps:get(PeerID, Banned, false),

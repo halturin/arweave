@@ -1154,7 +1154,8 @@ handle_post_tx_accepted(Req, PeerIP, TX) ->
 	%% IP-based throttling, to avoid connectivity issues at the times
 	%% of excessive transaction volumes.
 	ar_blacklist_middleware:decrement_ip_addr(PeerIP, Req),
-	ar_events:send(tx, {new, TX, PeerIP}),
+	PeerID = ar_http_util:arweave_peer(Req),
+	ar_events:send(tx, {new, TX, PeerID}),
 	case TX#tx.format of
 		2 ->
 			ar_data_sync:add_data_root_to_disk_pool(TX#tx.data_root, TX#tx.data_size, TX#tx.id);
@@ -1395,11 +1396,12 @@ val_for_key(K, L) ->
 %% @doc Handle multiple steps of POST /block. First argument is a subcommand,
 %% second the argument for that subcommand.
 post_block(request, {Req, Pid}, ReceiveTimestamp) ->
-	OrigPeer = ar_http_util:arweave_peer(Req),
-	case ar_blacklist_middleware:is_peer_banned(OrigPeer) of
+	{PeerIP, _TcpPeerPort} = cowboy_req:peer(Req),
+	case ar_blacklist_middleware:is_ip_banned(PeerIP) of
 		not_banned ->
 			case ar_node:is_joined() of
 				true ->
+					OrigPeer = ar_http_util:arweave_peer(Req),
 					post_block(read_blockshadow, OrigPeer, {Req, Pid}, ReceiveTimestamp);
 				false ->
 					%% The node is not ready to validate and accept blocks.

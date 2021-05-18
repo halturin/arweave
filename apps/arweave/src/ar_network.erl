@@ -38,7 +38,13 @@
 	get_wallet_list_chunk/2,
 
 	get_sync_records/0,
-	get_chunks/1
+	get_chunks/1,
+
+	% peering
+	peering/3,
+	peers_joined/0,
+	peers_top_joined/0,
+	peers_offline/0
 ]).
 
 -include_lib("arweave/include/ar.hrl").
@@ -94,7 +100,15 @@ add_peer_candidate({A,B,C,D} = IP, Port) when Port > 0, Port < 65536,
 											D > -1, D < 256 ->
 	% do not overwrite if its already exist
 	% {{IP,Port}, Pid, Timestamp, PeerID}
-	ets:insert_new(?MODULE, {{IP, Port}, undefined, undefined, undefined});
+	{ok, Config} = application:get_env(arweave, config),
+	LocalPort = Config#config.port,
+	case {IP, Port} of
+		{{127,0,0,1}, LocalPort} ->
+			% do not add itself during the CT
+			false;
+		_ ->
+			ets:insert_new(?MODULE, {{IP, Port}, undefined, undefined, undefined})
+	end;
 %% ignore any garbage
 add_peer_candidate(_IP, _Port) -> false.
 -else.
@@ -211,6 +225,65 @@ get_sync_records() ->
 get_chunks(Chunks) ->
 	request(affinity, {get_chunk, Chunks}, 60000).
 
+% Start a peering process with the given IP/Port
+peering(IP, Port, Options)->
+	?LOG_DEBUG("Network. Peering with ~p. Connecting...", [{IP,Port}]),
+	T = os:system_time(second),
+	SleepTime = proplists:get_value(sleep_time, Options, ?PEER_SLEEP_TIME),
+	case ets:lookup(?MODULE, {IP,Port}) of
+		[] ->
+			% first time connects with this peer
+			{ok, Pid} = ar_network_peer_sup:start_peering({IP,Port}, Options),
+			ets:insert(?MODULE, {{IP,Port}, Pid, undefined, undefined}),
+			monitor(process, Pid);
+		[{{IP,Port}, undefined, undefined, undefined}] ->
+			% peer is the candidate. got it from another peer
+			{ok, Pid} = ar_network_peer_sup:start_peering({IP,Port}, Options),
+			ets:insert(?MODULE, {{IP,Port}, Pid, undefined, undefined}),
+			monitor(process, Pid);
+		[{{IP,Port}, undefined, Since, _PeerID}] when (T - Since)/60 > SleepTime ->
+			% peer was offline, but longer than given SleepTime
+			{ok, Pid} = ar_network_peer_sup:start_peering({IP,Port}, Options),
+			ets:insert(?MODULE, {{IP,Port}, Pid, undefined, undefined}),
+			monitor(process, Pid);
+		[{{_IP,_Port}, undefined, Since, _PeerID}] ->
+			% peer is offline. let him sleep.
+			{offline, Since};
+		[{{_IP,_Port}, Pid, _Since, _PeerID}] when is_pid(Pid) ->
+			% trying to start peering with the peer we already have peering
+			already_started
+	end.
+
+% Returns the list of established peering connections.
+peers_joined() ->
+	% returns list of {IP, Port, Pid, PeerID}. example: [{{127,0,0,1}, 1984, <0.12.123>, <<"PeerID">>}]
+	% where Pid - is a peering process handler (module: ar_network_peer)
+	ets:select(ar_network, [{{{'$1','$11'},'$2','$3','$4'},
+							[{is_pid, '$2'}, {'=<', '$3', os:system_time(second)}],
+							[{{'$1','$11','$2','$4'}}]}]).
+
+% Returns the ordered by rating list of established peering connections.
+peers_top_joined() ->
+	% ordered (by Rating) list of {PeerID, Rating, Host, Port}
+	TopJoined = ar_rating:get_top_joined(?PEERS_JOINED_MAX),
+	% create a map of joined peers using PeerID => {IP, Port, Pid, PeerID}
+	JoinedMap = lists:foldl(fun({IP,Port,Pid,PeerID}, Acc) ->
+		maps:put(PeerID, {IP, Port, Pid, PeerID}, Acc)
+	end, #{}, peers_joined()),
+	% create a list according to the TopJoined order
+	Top = lists:foldl(fun({PeerID, _Rating, _Host, _Port}, Acc) ->
+		case maps:get(PeerID, JoinedMap, false) of
+			false ->
+				Acc;
+			Peer ->
+				[Peer|Acc]
+		end
+	end, [], TopJoined),
+	lists:reverse(Top).
+
+% Returns the list of offline peers, including candidates
+peers_offline() ->
+	ets:select(ar_network, [{{{'$1','$11'},'$2','$3','$4'},[{'==', false, {is_pid, '$2'}}],[{{'$1','$11'}}]}]).
 %%--------------------------------------------------------------------
 %% @doc
 %% Starts the server
@@ -260,11 +333,6 @@ init([]) ->
 %% @end
 %%--------------------------------------------------------------------
 %%
-%% for the testing purposes we should be able to start peering manualy
-handle_call({peering, {A,B,C,D}, Port, Options}, _From, State) ->
-	P = peering({A,B,C,D}, Port, Options),
-	{reply, P, State};
-
 handle_call(Request, _From, State) ->
 	?LOG_ERROR([{event, unhandled_call}, {request, Request}]),
 	{reply, ok, State}.
@@ -420,13 +488,13 @@ handle_info({event, peer, {joined, PeerID, IP, Port}}, State) ->
 			?LOG_ERROR("internal error. got event joined from unknown peer",[{IP, Port, PeerID}]),
 			{noreply, State};
 		[{{IP,Port}, Pid, undefined, _}] when length(Joined) == 0 ->
-			?LOG_DEBUG("Network. First peer ~p:~p joined (~p)", [IP, Port, Pid]),
+			?LOG_DEBUG("Network. First peer ~p:~p joined (~p)", [PeerID, {IP, Port}, Pid]),
 			ar_events:send(network, connected),
 			T = os:system_time(second),
 			ets:insert(?MODULE, {{IP,Port}, Pid, T, PeerID}),
 			{noreply, State};
 		[{{IP,Port}, Pid, undefined, _}] ->
-			?LOG_DEBUG("Network. Peer ~p:~p N ~p joined (~p)", [IP, Port, length(Joined), Pid]),
+			?LOG_DEBUG("Network. Peer ~p:~p N ~p joined (~p)", [PeerID, {IP, Port}, length(Joined), Pid]),
 			T = os:system_time(second),
 			ets:insert(?MODULE, {{IP,Port}, Pid, T, PeerID}),
 			{noreply, State}
@@ -480,61 +548,6 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-peering(IP, Port, Options)->
-	?LOG_DEBUG("Network. Peering with ~p. Connecting...", [{IP,Port}]),
-	T = os:system_time(second),
-	SleepTime = proplists:get_value(sleep_time, Options, ?PEER_SLEEP_TIME),
-	case ets:lookup(?MODULE, {IP,Port}) of
-		[] ->
-			% first time connects with this peer
-			{ok, Pid} = ar_network_peer_sup:start_peering({IP,Port}, Options),
-			ets:insert(?MODULE, {{IP,Port}, Pid, undefined, undefined}),
-			monitor(process, Pid);
-		[{{IP,Port}, undefined, undefined, undefined}] ->
-			% peer is the candidate. got it from another peer
-			{ok, Pid} = ar_network_peer_sup:start_peering({IP,Port}, Options),
-			ets:insert(?MODULE, {{IP,Port}, Pid, undefined, undefined}),
-			monitor(process, Pid);
-		[{{IP,Port}, undefined, Since, _PeerID}] when (T - Since)/60 > SleepTime ->
-			% peer was offline, but longer than given SleepTime
-			{ok, Pid} = ar_network_peer_sup:start_peering({IP,Port}, Options),
-			ets:insert(?MODULE, {{IP,Port}, Pid, undefined, undefined}),
-			monitor(process, Pid);
-		[{{_IP,_Port}, undefined, Since, _PeerID}] ->
-			% peer is offline. let him sleep.
-			{offline, Since};
-		[{{_IP,_Port}, Pid, _Since, _PeerID}] when is_pid(Pid) ->
-			% trying to start peering with the peer we already have peering
-			already_started
-	end.
-
-peers_joined() ->
-	% returns list of {IP, Port, Pid, PeerID}. example: [{{127,0,0,1}, 1984, <0.12.123>, <<"PeerID">>}]
-	% where Pid - is a peering process handler (module: ar_network_peer)
-	ets:select(ar_network, [{{{'$1','$11'},'$2','$3','$4'},
-							[{is_pid, '$2'}, {'=<', '$3', os:system_time(second)}],
-							[{{'$1','$11','$2','$4'}}]}]).
-peers_top_joined() ->
-	% ordered (by Rating) list of {PeerID, Rating, Host, Port}
-	TopJoined = ar_rating:get_top_joined(?PEERS_JOINED_MAX),
-	% create a map of joined peers using PeerID => {IP, Port, Pid, PeerID}
-	JoinedMap = lists:foldl(fun({IP,Port,Pid,PeerID}, Acc) ->
-		maps:put(PeerID, {IP, Port, Pid, PeerID}, Acc)
-	end, #{}, peers_joined()),
-	% create a list according to the TopJoined order
-	Top = lists:foldl(fun({PeerID, _Rating, _Host, _Port}, Acc) ->
-		case maps:get(PeerID, JoinedMap, false) of
-			false ->
-				Acc;
-			Peer ->
-				[Peer|Acc]
-		end
-	end, [], TopJoined),
-	lists:reverse(Top).
-
-
-peers_offline() ->
-	ets:select(ar_network, [{{{'$1','$11'},'$2','$3','$4'},[{'==', false, {is_pid, '$2'}}],[{{'$1','$11'}}]}]).
 peer_went_offline(Pid, Reason) ->
 	T = os:system_time(second),
 	case ets:match(?MODULE, {'$1',Pid,'$2','$3'}) of
@@ -580,13 +593,15 @@ request(broadcast, {Request, Args}, Timeout) ->
 	Peers = peers_top_joined(),
 	N = length(Peers),
 	do_request_broadcast({Request, Args}, N, Timeout, Peers);
-request({broadcast, #{}, Max}, {Request, Args}, Timeout) ->
+
+request({broadcast, ExcludePeers, Max}, {Request, Args}, Timeout) when length(ExcludePeers) == 0 ->
 	Peers = lists:sublist(peers_top_joined(), Max),
 	N = length(Peers),
 	do_request_broadcast({Request, Args}, N, Timeout, Peers);
+
 request({broadcast, ExcludePeers, Max}, {Request, Args}, Timeout) ->
-	PeersFiltered = lists:filter(fun(P) ->
-		not maps:is_key(P, ExcludePeers)
+	PeersFiltered = lists:filter(fun({_IP, _Port, _Pid, PeerID}) ->
+		not maps:is_key(PeerID, ExcludePeers)
 	end, peers_top_joined()),
 	Peers = lists:sublist(PeersFiltered, Max),
 	N = length(Peers),

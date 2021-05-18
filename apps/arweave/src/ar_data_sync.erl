@@ -20,7 +20,11 @@
 -include_lib("arweave/include/ar_config.hrl").
 -include_lib("arweave/include/ar_data_sync.hrl").
 
+-ifdef(DEBUG).
+-define(SYNC_RANDOM_INTERVAL, 1000).
+-else.
 -define(SYNC_RANDOM_INTERVAL, 60 * 1000).
+-endif.
 
 %% @doc The state of the server managing data synchronization.
 -record(state, {
@@ -937,6 +941,7 @@ handle_call({add_chunk, _, _, _, _, _, _} = Msg, _From, State) ->
 		true ->
 			case add_chunk(DataRoot, DataPath, Chunk, Offset, TXSize, State) of
 				{ok, UpdatedState} ->
+					?LOG_DEBUG("Chunk has been added. Offset: ~p", [Offset]),
 					{reply, ok, UpdatedState};
 				{{error, Reason}, MaybeUpdatedState} ->
 					?LOG_WARNING([

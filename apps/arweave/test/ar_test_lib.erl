@@ -49,28 +49,42 @@ stop_test_application() ->
 	%% Do not stop dependencies.
 	os:cmd("rm -r " ++ Config#config.data_dir ++ "/*").
 
-start_peering({Peer, Port, Options}) ->
-	gen_server:call(ar_network, {peering, Peer, Port, Options}),
-	wait_for_network_connection(true).
+start_peering({Peer, Options}) ->
+	% get the port number of the remote peer
+	{ok, PeerConfig} = ct_rpc_call_strict(Peer, application, get_env, [arweave, config]),
+	IP = {127,0,0,1},
+	Port = PeerConfig#config.port,
+	ar_network:peering(IP, Port, Options),
+	wait_for_peering({IP, Port}, true).
 
 start_peering(Node, Peer) ->
-	% get the port number of the remote peer
-	{ok, PeerConfig} = ct_rpc_call_strict(Node, application, get_env, [arweave, config]),
-	% start peering local -> remote
-	start_peering({ Peer, PeerConfig#config.port, [{sleep_time, 0}] }),
 	% start peering remote -> local
-	{ok, Config} = application:get_env(arweave, config),
-	ct_rpc_call_strict(Node, ar_test_lib, start_peering, [{Peer, Config#config.port, [{sleep_time,0}] }]).
+	ct_rpc_call_strict(Node, ar_test_lib, start_peering, [{Peer, [{sleep_time,0}] }]).
 
+stop_peering(Peer) ->
+	{ok, PeerConfig} = ct_rpc_call_strict(Peer, application, get_env, [arweave, config]),
+	IP = {127,0,0,1},
+	Port = PeerConfig#config.port,
+	lists:map(fun({PeerIP,PeerPort, Pid, _PeerID}) when PeerIP == IP, PeerPort == Port ->
+					exit(Pid, normal);
+				(_) ->
+					ok
+	end, ar_network:peers_joined()),
+	wait_for_peering({IP, Port}, false).
 
-post_txs_and_mine(Node, TXs) when is_list(TXs) ->
-	ct_rpc_call_strict(Node, ar_test_lib, post_txs_and_mine, [TXs]).
+stop_peering(Node, Peer) ->
+	% get the port number of the remote peer
+	ct_rpc_call_strict(Node, ar_test_lib, stop_peering, [Peer]).
 
 post_txs_and_mine(TXs) when is_list(TXs) ->
 	Height = ar_node:get_height(),
 	post_txs(TXs),
 	ar_node:mine(),
 	Height.
+
+post_txs_and_mine(Node, TXs) when is_list(TXs) ->
+	ct_rpc_call_strict(Node, ar_test_lib, post_txs_and_mine, [TXs]).
+
 
 post_txs(TXs) when is_list(TXs) ->
 	lists:foreach(fun(TX) -> ok = post_tx(TX) end, TXs),
@@ -175,18 +189,40 @@ wait_for_chunks([{EndOffset, Proof} | Proofs]) ->
 	),
 	wait_for_chunks(Proofs).
 
-wait_for_network_connection(Connected) when is_boolean(Connected) ->
+%wait_for_network_connection(Connected) when is_boolean(Connected) ->
+%	ok = ar_util:do_until(
+%		fun() ->
+%			case ar_network:is_connected() of
+%				Connected -> ok;
+%				_ -> false
+%			end
+%		end,
+%		300,
+%		10000
+%	).
+
+wait_for_peering({IP,Port}, Peering) when is_boolean(Peering) ->
 	ok = ar_util:do_until(
-		fun() ->
-			case ar_network:is_connected() of
-				Connected -> ok;
-				_ -> false
-			end
+		fun() when Peering == true ->
+			lists:foldl(fun({PeerIP, PeerPort, Pid, _PeerID}, false)
+								when
+									is_pid(Pid) == Peering,
+									PeerIP == IP, PeerPort == Port ->
+							ok; % found
+						(_, Found) ->
+							Found
+			end, false, ar_network:peers_joined());
+		() -> % Peering == false
+			lists:foldl(fun({PeerIP, PeerPort}, false)
+								when PeerIP == IP, PeerPort == Port ->
+							ok; % found
+						(_, Found) ->
+							Found
+			end, false, ar_network:peers_offline())
 		end,
 		300,
 		10000
 	).
-
 
 get_chunk(Offset) ->
 	{ok, Config} = application:get_env(arweave, config),
@@ -240,40 +276,6 @@ read_block_when_stored(H) ->
 			MaybeB
 	end.
 
-stop_peering(Node, Peer) ->
-	ct_rpc_call_strict(Node, ar_test_lib, stop_peering, [Peer]).
-
-stop_peering(Peer) ->
-	%% Disconnects this node from a peer so that they do not share blocks
-	%% and transactions unless they were bound by ar_node:add_peers/2.
-	%% The peers are added in ar_meta_db so that they do not start adding each other
-	%% to their peer lists after disconnect.
-	%% Also, all HTTP requests made in this module are made with the
-	%% x-p2p-port HTTP header corresponding to the listening port of
-	%% the receiving node so that freshly started nodes do not start peering
-	%% unless connect_to_slave/0 is called.
-	{ok, Config} = application:get_env(arweave, config),
-	Port = Config#config.port,
-	PeerPort = ct_rpc_call_strict(Peer, ar_meta_db, get, [port]),
-	true = ar_meta_db:put({peer, {127, 0, 0, 1, PeerPort}}, #performance{}),
-	true =
-		ct_rpc_call_strict(
-			Peer,
-			ar_meta_db,
-			put,
-			[{peer, {127, 0, 0, 1, Port}}, #performance{}]
-		),
-	ar_bridge:set_remote_peers([]),
-	ct_rpc_call_strict(Peer, ar_bridge, set_remote_peers, [[]]),
-	application:set_env(arweave, config, Config#config{peers = []}),
-	{ok, SlaveConfig} = ct_rpc_call_strict(Peer, application, get_env, [arweave, config]),
-	ok =
-		ct_rpc_call_strict(
-			Peer,
-			application,
-			set_env,
-			[arweave, config, SlaveConfig#config{ peers = [] }]
-		).
 
 mine(Node) ->
 	ct_rpc_call_strict(Node, ar_test_lib, mine, []).

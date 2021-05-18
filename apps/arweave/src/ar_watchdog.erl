@@ -207,6 +207,10 @@ handle_info(no_foreign_blocks, State) when State#state.connected ->
 	{ok, Timer} = timer:send_after(?FOREIGN_BLOCK_ALERT_TIME, ?MODULE, no_foreign_blocks),
 	{noreply, State#state{ no_foreign_blocks_timer = Timer }};
 
+handle_info(no_foreign_blocks, State) ->
+	% Do nothing. Waiting for the network
+	{noreply, State};
+
 handle_info({'EXIT', _Pid, normal}, State) ->
 	%% Gun sets monitors on the spawned processes, so thats the reason why we
 	%% catch them here.

@@ -6,7 +6,7 @@
 -export([start/0]).
 -export([execute/2]).
 -export([reset/0, reset_rate_limit/3]).
--export([ban_peer/2, is_peer_banned/1, cleanup_ban/1]).
+-export([ban_peer/2, is_ip_banned/1, cleanup_ban/1]).
 -export([decrement_ip_addr/2]).
 
 -include_lib("arweave/include/ar.hrl").
@@ -44,9 +44,8 @@ ban_peer(Peer, TTLSeconds) ->
 	Expires = os:system_time(seconds) + TTLSeconds,
 	ets:insert(?MODULE, {Key, Expires}).
 
-is_peer_banned(Peer) ->
-	Key = {ban, peer_to_ip_addr(Peer)},
-	case ets:lookup(?MODULE, Key) of
+is_ip_banned(PeerIP) ->
+	case ets:lookup(?MODULE, PeerIP) of
 		[] -> not_banned;
 		[_] -> banned
 	end.
@@ -97,13 +96,13 @@ reset_rate_limit(TableID, IpAddr, Path) ->
 	end.
 
 increment_ip_addr(IpAddr, Req) ->
-	case ets:whereis(?MODULE) of 
+	case ets:whereis(?MODULE) of
 		undefined -> pass;
 		_ -> update_ip_addr(IpAddr, Req, 1)
 	end.
 
 decrement_ip_addr(IpAddr, Req) ->
-	case ets:whereis(?MODULE) of 
+	case ets:whereis(?MODULE) of
 		undefined -> pass;
 		_ -> update_ip_addr(IpAddr, Req, -1)
 	end.

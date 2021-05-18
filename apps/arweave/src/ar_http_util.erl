@@ -28,7 +28,9 @@ arweave_peer(Req) ->
 			undefined -> ?DEFAULT_HTTP_IFACE_PORT;
 			Binary -> binary_to_integer(Binary)
 		end,
-	{IpV4_1, IpV4_2, IpV4_3, IpV4_4, ArweavePeerPort}.
+	Peer_IP_Port = {IpV4_1, IpV4_2, IpV4_3, IpV4_4, ArweavePeerPort},
+	% if you change this format, please update ar_network_peer:validate_network as well
+	list_to_binary(lists:flatten(io_lib:format("~p",[Peer_IP_Port]))).
 
 %%%===================================================================
 %%% Private functions.
