@@ -41,7 +41,6 @@
 	get_chunks/1,
 
 	% peering
-	peering/3,
 	peers_joined/0,
 	peers_top_joined/0,
 	peers_offline/0
@@ -135,7 +134,15 @@ add_peer_candidate(_IP, _Port) -> false.
 %% false - has no peering connections at all
 %% @end
 is_connected() ->
-	length(peers_joined()) > 0.
+	{ok, Config} = application:get_env(arweave, config),
+	case length(Config#config.peers) of
+		0 ->
+			% This is very first node in the Arweave network so
+			% its always connected
+			true;
+		_ ->
+			length(peers_joined()) > 0
+	end.
 
 %%
 %% Methods below are requesting information via the network
@@ -225,35 +232,6 @@ get_sync_records() ->
 get_chunks(Chunks) ->
 	request(affinity, {get_chunk, Chunks}, 60000).
 
-% Start a peering process with the given IP/Port
-peering(IP, Port, Options)->
-	?LOG_DEBUG("Network. Peering with ~p. Connecting...", [{IP,Port}]),
-	T = os:system_time(second),
-	SleepTime = proplists:get_value(sleep_time, Options, ?PEER_SLEEP_TIME),
-	case ets:lookup(?MODULE, {IP,Port}) of
-		[] ->
-			% first time connects with this peer
-			{ok, Pid} = ar_network_peer_sup:start_peering({IP,Port}, Options),
-			ets:insert(?MODULE, {{IP,Port}, Pid, undefined, undefined}),
-			monitor(process, Pid);
-		[{{IP,Port}, undefined, undefined, undefined}] ->
-			% peer is the candidate. got it from another peer
-			{ok, Pid} = ar_network_peer_sup:start_peering({IP,Port}, Options),
-			ets:insert(?MODULE, {{IP,Port}, Pid, undefined, undefined}),
-			monitor(process, Pid);
-		[{{IP,Port}, undefined, Since, _PeerID}] when (T - Since)/60 > SleepTime ->
-			% peer was offline, but longer than given SleepTime
-			{ok, Pid} = ar_network_peer_sup:start_peering({IP,Port}, Options),
-			ets:insert(?MODULE, {{IP,Port}, Pid, undefined, undefined}),
-			monitor(process, Pid);
-		[{{_IP,_Port}, undefined, Since, _PeerID}] ->
-			% peer is offline. let him sleep.
-			{offline, Since};
-		[{{_IP,_Port}, Pid, _Since, _PeerID}] when is_pid(Pid) ->
-			% trying to start peering with the peer we already have peering
-			already_started
-	end.
-
 % Returns the list of established peering connections.
 peers_joined() ->
 	% returns list of {IP, Port, Pid, PeerID}. example: [{{127,0,0,1}, 1984, <0.12.123>, <<"PeerID">>}]
@@ -332,7 +310,11 @@ init([]) ->
 %%									 {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-%%
+
+%% for the testing purposes only
+handle_call({peering, IP, Port, Opts}, _From, State) ->
+	Result = peering(IP, Port, Opts),
+	{reply, Result, State};
 handle_call(Request, _From, State) ->
 	?LOG_ERROR([{event, unhandled_call}, {request, Request}]),
 	{reply, ok, State}.
@@ -357,6 +339,7 @@ handle_cast(join, State) ->
 			% the peering right away and set the network state
 			% as 'connected' to start all the rest processes
 			% are depending on the network.
+			?LOG_DEBUG("Online (very first node)"),
 			ar_events:send(network, connected),
 			gen_server:cast(?MODULE, peering),
 			{noreply, State};
@@ -364,7 +347,9 @@ handle_cast(join, State) ->
 			lists:map(fun({A,B,C,D,Port}) ->
 				% Override default PEER_SLEEP_TIME for the trusted peers.
 				% During the joining we should ignore this timing.
-				peering({A,B,C,D}, Port, [{sleep_time, 0}])
+				% We can't use less than 1 minute otherwise it makes
+				% Commont Tests broken
+				peering({A,B,C,D}, Port, [{sleep_time, 1}])
 			end, Config#config.peers),
 			% send some metrics
 			prometheus_gauge:set(arweave_peer_count, length(Peers)),
@@ -483,18 +468,23 @@ handle_info({event, node, Reason}, State) ->
 	{noreply, State#state{ready = false, peering_timer = undefined}};
 handle_info({event, peer, {joined, PeerID, IP, Port}}, State) ->
 	Joined = peers_joined(),
+	{ok, Config} = application:get_env(arweave, config),
 	case ets:lookup(?MODULE, {IP,Port}) of
 		[] ->
 			?LOG_ERROR("internal error. got event joined from unknown peer",[{IP, Port, PeerID}]),
 			{noreply, State};
-		[{{IP,Port}, Pid, undefined, _}] when length(Joined) == 0 ->
-			?LOG_DEBUG("Network. First peer ~p:~p joined (~p)", [PeerID, {IP, Port}, Pid]),
+		[{{IP,Port}, Pid, undefined, _}] when 	length(Joined) == 0,
+												length(Config#config.peers) > 0 ->
+			% Having the guard for Config#config.peers is that
+			% we shouldn't send the event 'connected' if we have no trusted peers
+			% because we already sent it in the handle_cast(join,..). See comment there.
 			ar_events:send(network, connected),
+			?LOG_DEBUG("Online. First peer ~p:~p joined (~p)", [PeerID, {IP, Port}, Pid]),
 			T = os:system_time(second),
 			ets:insert(?MODULE, {{IP,Port}, Pid, T, PeerID}),
 			{noreply, State};
 		[{{IP,Port}, Pid, undefined, _}] ->
-			?LOG_DEBUG("Network. Peer ~p:~p N ~p joined (~p)", [PeerID, {IP, Port}, length(Joined), Pid]),
+			?LOG_DEBUG("Online. Peer ~p:~p N ~p joined (~p)", [PeerID, {IP, Port}, length(Joined), Pid]),
 			T = os:system_time(second),
 			ets:insert(?MODULE, {{IP,Port}, Pid, T, PeerID}),
 			{noreply, State}
@@ -508,6 +498,7 @@ handle_info({'DOWN', _Ref, process, Pid, Reason}, State) ->
 	peer_went_offline(Pid, Reason),
 	case peers_joined() of
 		[] ->
+			?LOG_DEBUG("Offline"),
 			ar_events:send(network, disconnected),
 			gen_server:cast(?MODULE, join),
 			{noreply, State};
@@ -547,6 +538,42 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+% Start a peering process with the given IP/Port
+peering(IP, Port, Options)->
+	?LOG_DEBUG("Network. Peering with ~p. Connecting...", [{IP,Port,Options}]),
+	% Add 1 second for the case of starting peering with sleep_time = 0 and
+	% we already had peering with IP:Port active less than a second ago.
+	% This case usually happens during the common testing.
+	T = os:system_time(second)+1,
+	SleepTime = proplists:get_value(sleep_time, Options, ?PEER_SLEEP_TIME),
+	case ets:lookup(?MODULE, {IP,Port}) of
+		[] ->
+			% first time connects with this peer
+			{ok, Pid} = ar_network_peer_sup:start_peering({IP,Port}, Options),
+			ets:insert(?MODULE, {{IP,Port}, Pid, undefined, undefined}),
+			monitor(process, Pid),
+			Pid;
+		[{{IP,Port}, undefined, undefined, undefined}] ->
+			% peer is the candidate. got it from another peer
+			{ok, Pid} = ar_network_peer_sup:start_peering({IP,Port}, Options),
+			ets:insert(?MODULE, {{IP,Port}, Pid, undefined, undefined}),
+			monitor(process, Pid),
+			Pid;
+		[{{IP,Port}, undefined, Since, _PeerID}] when (T - Since)/60 > SleepTime ->
+			% peer was offline, but longer than given SleepTime
+			{ok, Pid} = ar_network_peer_sup:start_peering({IP,Port}, Options),
+			ets:insert(?MODULE, {{IP,Port}, Pid, undefined, undefined}),
+			monitor(process, Pid),
+			Pid;
+		[{{_IP,_Port}, undefined, Since, _PeerID}] ->
+			% peer is offline. let him sleep.
+			?LOG_DEBUG("Sleep. (peer: ~p, opts: ~p)", [{IP,Port}, Options]),
+			{offline, Since};
+		[{{_IP,_Port}, Pid, _Since, _PeerID}] when is_pid(Pid) ->
+			% trying to start peering with the peer we already have peering
+			already_started
+	end.
 
 peer_went_offline(Pid, Reason) ->
 	T = os:system_time(second),

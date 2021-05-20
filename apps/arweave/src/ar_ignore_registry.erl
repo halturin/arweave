@@ -28,7 +28,12 @@ add_temporary(ID, Timeout) ->
 
 %% @doc Remove the temporary record from the registry.
 remove_temporary(ID) ->
-	ets:delete_object(ignored_ids, {ID, temporary}).
+	case ets:info(ignored_ids) of
+		undefined ->
+			ok;
+		_ ->
+			ets:delete_object(ignored_ids, {ID, temporary})
+	end.
 
 %% @doc Check if there is a temporary or a permanent record in the registry.
 member(ID) ->

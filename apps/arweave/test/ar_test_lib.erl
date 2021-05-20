@@ -19,6 +19,7 @@
 	wait_for_txs/1, wait_for_txs/2,
 	wait_for_chunks/1, wait_for_chunks/2,
 
+	wait_for_peering/2,
 	read_block_when_stored/1
 ]).
 
@@ -54,7 +55,7 @@ start_peering({Peer, Options}) ->
 	{ok, PeerConfig} = ct_rpc_call_strict(Peer, application, get_env, [arweave, config]),
 	IP = {127,0,0,1},
 	Port = PeerConfig#config.port,
-	ar_network:peering(IP, Port, Options),
+	gen_server:call(ar_network, {peering, IP, Port, Options}),
 	wait_for_peering({IP, Port}, true).
 
 start_peering(Node, Peer) ->
@@ -65,15 +66,15 @@ stop_peering(Peer) ->
 	{ok, PeerConfig} = ct_rpc_call_strict(Peer, application, get_env, [arweave, config]),
 	IP = {127,0,0,1},
 	Port = PeerConfig#config.port,
-	lists:map(fun({PeerIP,PeerPort, Pid, _PeerID}) when PeerIP == IP, PeerPort == Port ->
-					exit(Pid, normal);
-				(_) ->
-					ok
-	end, ar_network:peers_joined()),
+	found = lists:foldl(fun({PeerIP,PeerPort, Pid, _PeerID}, _) when PeerIP == IP, PeerPort == Port ->
+					exit(Pid, normal),
+				 	found;
+				(_, Found) ->
+					Found
+	end, not_found, ar_network:peers_joined()),
 	wait_for_peering({IP, Port}, false).
 
 stop_peering(Node, Peer) ->
-	% get the port number of the remote peer
 	ct_rpc_call_strict(Node, ar_test_lib, stop_peering, [Peer]).
 
 post_txs_and_mine(TXs) when is_list(TXs) ->
