@@ -471,7 +471,7 @@ handle_info({event, peer, {joined, PeerID, IP, Port}}, State) ->
 	{ok, Config} = application:get_env(arweave, config),
 	case ets:lookup(?MODULE, {IP,Port}) of
 		[] ->
-			?LOG_ERROR("internal error. got event joined from unknown peer",[{IP, Port, PeerID}]),
+			?LOG_ERROR("internal error. got event joined from unknown peer ~p",[{IP, Port, PeerID}]),
 			{noreply, State};
 		[{{IP,Port}, Pid, undefined, _}] when 	length(Joined) == 0,
 												length(Config#config.peers) > 0 ->

@@ -39,5 +39,7 @@ init([]) ->
 		% events: new, mine, drop
 		?CHILD(ar_events, tx, worker),
 		% events: new
-		?CHILD(ar_events, block, worker)
+		?CHILD(ar_events, block, worker),
+		% for the testing purposes
+		?CHILD(ar_events, testing, worker)
 	]}}.

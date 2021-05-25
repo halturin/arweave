@@ -287,7 +287,7 @@ check_rate_and_triggers(_Config) ->
 	% subscribe for the 'access' events to catch a 'ban'
 	ar_events:subscribe([access]),
 	T1 = os:system_time(second),
-	ar_events:send(peer, {attack, any, EventPeer}),
+	spawn(fun() -> ar_events:send(peer, {attack, any, EventPeer}) end),
 	BanTimeAttack = wait_ban(PeerIncReq),
 	BanTimeAttack = T1 +60*1440,
 	ar_events:cancel(access),
@@ -308,24 +308,6 @@ check_rate_and_triggers(_Config) ->
 	BanTime = T2 +60*60,
 	ar_events:cancel(access),
 
-	% ========================================================================================
-	% CASE trigger 'offline' : peer is already joined, do some requests, catch 'offline' event,
-	% check rating, check status offline/online
-	% ========================================================================================
-	% make zero rating
-	ets:insert(ar_rating, {{peer, PeerIncReq}, #rating{since = T - 100000}}),
-	ar_events:subscribe([peer]),
-	lists:map(fun(_) ->
-					ar_events:send(peer, {response, connect_timeout, EventPeer})
-			  end, lists:seq(1,7)),
-
-	wait_offline(PeerIncReq),
-	case ets:lookup(ar_rating, {peer, PeerIncReq}) of
-		[] ->
-			ok;
-		_ ->
-			ct:fail("peer is still online")
-	end,
 	ok = ar_kv:delete(RatingDB, term_to_binary(PeerIncReq)),
 	ok.
 
@@ -337,10 +319,11 @@ check_get_top_n_get_banned(_Config) ->
 				   {peerG,10, false}, {peerH,15, false}, {peerI,1000, true},
 				   {peerK,999, false}, {peerL,2,false}, {peerM,8,true},
 				   {peerN, 99,false}],
+	BanTime = os:system_time(second) + 10000000,
 	lists:map(fun({Peer, R, Banned}) ->
 				Ban = case Banned of
 						true ->
-							  os:system_time(second) + 10000000;
+							BanTime;
 						_ ->
 							  0
 					end,
@@ -356,7 +339,7 @@ check_get_top_n_get_banned(_Config) ->
 	ets:insert(ar_rating, {peerA, peer, #rating{r=777777777}}),
 	% ...and add a couple of valid ones into the ets tabe
 	ets:insert(ar_rating, {{peer, peerX}, #rating{ban=0, r=888}}),
-	ets:insert(ar_rating, {{peer, peerY}, #rating{ban=os:system_time(second) + 10000000, r=888}}),
+	ets:insert(ar_rating, {{peer, peerY}, #rating{ban=BanTime, r=888}}),
 
 	% get_top (from RocksDB)
 	[{peerK,999,undefined,1984}] = ar_rating:get_top(1),
@@ -384,12 +367,12 @@ check_get_top_n_get_banned(_Config) ->
 
 	% get_banned
 	Banned = #{
-		peerM => {8,undefined,1984},
-		peerE => {300,undefined,1984},
-		peerC => {1,undefined,1984},
-		peerI => {1000,undefined,1984}
+		peerM => {8,undefined,1984, BanTime},
+		peerE => {300,undefined,1984, BanTime},
+		peerC => {1,undefined,1984, BanTime},
+		peerI => {1000,undefined,1984, BanTime}
 	},
-	X = ar_rating:get_banned(),
+	Banned = ar_rating:get_banned(),
 
 	% get peer info {Rating, Banned, Host, Port, online|offline}.
 	{100, 0, undefined, 1984, online} = ar_rating:get(peerA),

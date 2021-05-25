@@ -107,9 +107,11 @@ end_per_suite(Config) ->
 %%
 %% Description: Initialization before each test case group.
 %%--------------------------------------------------------------------
-init_per_group(_GroupName, Config) ->
+init_per_group(nodeNetwork, Config) ->
 	Config1 = start_master_application(Config),
-	start_slave_application(Config1).
+	start_slave_application(Config1);
+init_per_group(_GroupName, Config) ->
+	start_master_application(Config).
 
 %%--------------------------------------------------------------------
 %% Function: end_per_group(GroupName, Config0) ->
@@ -122,8 +124,10 @@ init_per_group(_GroupName, Config) ->
 %%
 %% Description: Cleanup after each test case group.
 %%--------------------------------------------------------------------
-end_per_group(_GroupName, Config) ->
+end_per_group(nodeNetwork, Config) ->
 	stop_slave_application(Config),
+	stop_master_application(Config);
+end_per_group(_GroupName, Config) ->
 	stop_master_application(Config).
 
 %%--------------------------------------------------------------------
@@ -185,16 +189,21 @@ end_per_testcase(_TestCase, Config) ->
 groups() ->
     [
     {nodeBasic,[sequence], [
-			ar_data_sync_fork_recovery,
+			% on master node only. application is not running on the slave
 			events_subscribe_send_cancel,
 			events_process_terminated,
 			rating_peer_join_leave_rejoin,
 			rating_check_rate_and_triggers,
 			rating_check_get_top_n_get_banned
-        ]},
+    	]},
 	{nodeNetwork,[sequence],[
+			% application is running on master and slave
+			ar_data_sync_fork_recovery,
 			network_join_leave_stateless,
 			network_join_leave_stateful
+		]},
+	{nodeCluster, [sequence], [
+			% application is running on master and 5 slaves
 		]}
 	].
 
