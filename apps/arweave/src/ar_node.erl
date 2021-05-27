@@ -22,7 +22,6 @@
 	mine/0,
 	add_tx/1,
 	add_peers/1,
-	set_loss_probability/1,
 	get_mempool_size/0,
 	get_block_shadow_from_cache/1
 ]).
@@ -276,8 +275,3 @@ add_peers(Peer) when not is_list(Peer) ->
 add_peers(Peers) ->
 	gen_server:cast(ar_node_worker, {add_peers, Peers}).
 
-%% @doc Set the likelihood that a message will be dropped in transmission.
-%% Used primarily for testing, simulating packet loss.
-%% @end
-set_loss_probability(Prob) ->
-	gen_server:cast(ar_node_worker, {set_loss_probability, Prob}).

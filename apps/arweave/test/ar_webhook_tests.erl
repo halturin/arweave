@@ -50,7 +50,8 @@ test_webhooks() ->
 			url = <<"http://127.0.0.1:1986/block">>,
 			events = [block]
 		}
-	]},
+	],
+	debug = true},
 	start(B0, unclaimed, Config2),
 	%% Setup a server that would be listening for the webhooks and registering
 	%% them in the ETS table.
@@ -90,7 +91,7 @@ test_webhooks() ->
 									jiffy:decode(ar_serialize:jsonify(Struct), [return_maps])
 								),
 							?assertEqual(Expected, B),
-							true;	
+							true;
 						_ ->
 							false
 					end

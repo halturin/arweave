@@ -4,7 +4,6 @@
 	start/1, start/2, start/3, slave_start/1, slave_start/2, wait_until_joined/0,
 	connect_to_slave/0, disconnect_from_slave/0,
 	slave_call/3, slave_call/4,
-	gossip/1, slave_gossip/1,
 	slave_add_tx/1,
 	slave_mine/0,
 	wait_until_height/1, slave_wait_until_height/1, assert_slave_wait_until_height/1,
@@ -136,32 +135,44 @@ join_on_master() ->
 	slave_call(ar_test_node, join, [{127, 0, 0, 1, ar_meta_db:get(port)}]).
 
 connect_to_slave() ->
+	ar_test_lib:start_peering(slave).
 	%% Connect the nodes by making two HTTP calls.
 	%%
 	%% After a request to a peer, the peer is recorded in ar_meta_db but
 	%% not in the remote peer list. So we need to remove it from ar_meta_db
 	%% otherwise it's not added to the remote peer list when it makes a request
 	%% to us in turn.
-	MasterPort = ar_meta_db:get(port),
-	slave_call(ar_meta_db, reset_peer, [{127, 0, 0, 1, MasterPort}]),
-	SlavePort = slave_call(ar_meta_db, get, [port]),
-	{ok, {{<<"200">>, <<"OK">>}, _, _, _, _}} =
-		ar_http:req(#{
-			method => get,
-			peer => {127, 0, 0, 1, SlavePort},
-			path => "/info",
-			headers => [{<<"X-P2p-Port">>, integer_to_binary(MasterPort)}]
-		}),
-	ar_meta_db:reset_peer({127, 0, 0, 1, SlavePort}),
-	{ok, {{<<"200">>, <<"OK">>}, _, _, _, _}} =
-		ar_http:req(#{
-			method => get,
-			peer => {127, 0, 0, 1, MasterPort},
-			path => "/info",
-			headers => [{<<"X-P2p-Port">>, integer_to_binary(SlavePort)}]
-		}).
+	%MasterPort = ar_meta_db:get(port),
+	%slave_call(ar_meta_db, reset_peer, [{127, 0, 0, 1, MasterPort}]),
+	%SlavePort = slave_call(ar_meta_db, get, [port]),
+	%{ok, {{<<"200">>, <<"OK">>}, _, _, _, _}} =
+	%	ar_http:req(#{
+	%		method => get,
+	%		peer => {127, 0, 0, 1, SlavePort},
+	%		path => "/info",
+	%		headers => [{<<"X-P2p-Port">>, integer_to_binary(MasterPort)}]
+	%	}),
+	%ar_meta_db:reset_peer({127, 0, 0, 1, SlavePort}),
+	%{ok, {{<<"200">>, <<"OK">>}, _, _, _, _}} =
+	%	ar_http:req(#{
+	%		method => get,
+	%		peer => {127, 0, 0, 1, MasterPort},
+	%		path => "/info",
+	%		headers => [{<<"X-P2p-Port">>, integer_to_binary(SlavePort)}]
+	%	}).
 
 disconnect_from_slave() ->
+	ar_test_lib:stop_peering(slave).
+	%Config = slave_call(application, get_env, [arweave, config]),
+	%IP = {127,0,0,1}
+	%Port = Config#config.port,
+	%found = lists:foldl(fun({PeerIP,PeerPort, Pid, _PeerID}, _) when PeerIP == IP, PeerPort == Port ->
+	%				exit(Pid, normal),
+	%			 	found;
+	%			(_, Found) ->
+	%				Found
+	%end, not_found, ar_network:peers_joined()),
+
 	%% Disconnects master from slave so that they do not share blocks
 	%% and transactions unless they were bound by ar_node:add_peers/2.
 	%% The peers are added in ar_meta_db so that they do not start adding each other
@@ -170,32 +181,23 @@ disconnect_from_slave() ->
 	%% x-p2p-port HTTP header corresponding to the listening port of
 	%% the receiving node so that freshly started nodes do not start peering
 	%% unless connect_to_slave/0 is called.
-	SlavePort = slave_call(ar_meta_db, get, [port]),
-	ar_meta_db:put({peer, {127, 0, 0, 1, SlavePort}}, #performance{}),
-	MasterPort = ar_meta_db:get(port),
-	slave_call(ar_meta_db, put, [{peer, {127, 0, 0, 1, MasterPort}}, #performance{}]),
-	slave_call(ar_bridge, set_remote_peers, [[]]),
-	ar_bridge:set_remote_peers([]),
-	{ok, Config} = application:get_env(arweave, config),
-	application:set_env(arweave, config, Config#config{ peers = [] }),
-	{ok, SlaveConfig} = slave_call(application, get_env, [arweave, config]),
-	slave_call(application, set_env, [arweave, config, SlaveConfig#config{ peers = [] }]).
-
-gossip(off) ->
-	ar_node:set_loss_probability(1);
-gossip(on) ->
-	ar_node:set_loss_probability(0).
+	%%
+	%SlavePort = slave_call(ar_meta_db, get, [port]),
+	%ar_meta_db:put({peer, {127, 0, 0, 1, SlavePort}}, #performance{}),
+	%MasterPort = ar_meta_db:get(port),
+	%slave_call(ar_meta_db, put, [{peer, {127, 0, 0, 1, MasterPort}}, #performance{}]),
+	%slave_call(ar_bridge, set_remote_peers, [[]]),
+	%ar_bridge:set_remote_peers([]),
+	%{ok, Config} = application:get_env(arweave, config),
+	%application:set_env(arweave, config, Config#config{ peers = [] }),
+	%{ok, SlaveConfig} = slave_call(application, get_env, [arweave, config]),
+	%slave_call(application, set_env, [arweave, config, SlaveConfig#config{ peers = [] }]).
 
 slave_call(Module, Function, Args) ->
 	slave_call(Module, Function, Args, 60000).
 
 slave_call(Module, Function, Args, Timeout) ->
 	ar_rpc:call(slave, Module, Function, Args, Timeout).
-
-slave_gossip(off) ->
-	slave_call(?MODULE, gossip, [off]);
-slave_gossip(on) ->
-	slave_call(?MODULE, gossip, [on]).
 
 slave_add_tx(TX) ->
 	slave_call(ar_node, add_tx, [TX]).

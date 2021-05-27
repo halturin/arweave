@@ -64,6 +64,7 @@ init([]) ->
 		?CHILD(ar_data_sync, worker),
 		?CHILD(ar_node_worker, worker),
 		?CHILD(ar_poller, worker),
+		?CHILD(ar_webhook_sup, supervisor),
 		% Joining to the Arweave network once all the processes are ready
 		?CHILD(ar_node_join, worker)
 	]}}.

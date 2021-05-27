@@ -100,6 +100,7 @@ handle_call(Request, _From, State) ->
 handle_cast(join, State) ->
 	?LOG_DEBUG("Node joining start."),
 	{ok, Config} = application:get_env(arweave, config),
+	?LOG_DEBUG("DDDDDDDDDDDD ~p", [{Config#config.start_from_block_index, Config#config.init}]),
 	BI =
 		case {Config#config.start_from_block_index, Config#config.init} of
 			{false, false} ->
@@ -132,7 +133,6 @@ handle_cast(join, State) ->
 			gen_server:cast(?MODULE, joining),
 			{noreply, State#state{joining = true}};
 		{[#block{} = GenesisB], true} ->
-			?LOG_DEBUG("Node joined"),
 			BI = [ar_util:block_index_entry_from_block(GenesisB)],
 			ar_events:send(node, {joined, BI, [GenesisB]}),
 			{noreply, State};
@@ -154,7 +154,11 @@ handle_cast(joining, State) when State#state.connected ->
 	?LOG_DEBUG("Node joining ..."),
 	case ar_network:get_current_block_index() of
 		error ->
-			?LOG_DEBUG("Node joining (next attempt) ... "),
+			?LOG_DEBUG("Node joining. Network error. (next attempt) ... "),
+			timer:send_after(?REJOIN_TIMEOUT, {'$gen_cast', joining}),
+			{noreply, State};
+		{nopeers, _} ->
+			?LOG_DEBUG("Node joining. No peers. (next attempt) ... "),
 			timer:send_after(?REJOIN_TIMEOUT, {'$gen_cast', joining}),
 			{noreply, State};
 		BI ->

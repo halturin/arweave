@@ -418,7 +418,7 @@ warn_if_single_scheduler() ->
 
 %% @doc Run all of the tests associated with the core project.
 tests() ->
-	tests(?CORE_TEST_MODS, #config {}).
+	tests(?CORE_TEST_MODS, #config {init = true, debug = true}).
 
 tests(Mods, Config) when is_list(Mods) ->
 	start_for_tests(Config),
