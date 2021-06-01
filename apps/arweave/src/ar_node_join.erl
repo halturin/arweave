@@ -100,7 +100,6 @@ handle_call(Request, _From, State) ->
 handle_cast(join, State) ->
 	?LOG_DEBUG("Node joining start."),
 	{ok, Config} = application:get_env(arweave, config),
-	?LOG_DEBUG("DDDDDDDDDDDD ~p", [{Config#config.start_from_block_index, Config#config.init}]),
 	BI =
 		case {Config#config.start_from_block_index, Config#config.init} of
 			{false, false} ->
@@ -119,6 +118,8 @@ handle_cast(join, State) ->
 						BI2
 				end;
 			{false, true} ->
+				% Do not initialize one more time if it was restarted
+				% by supervisor due to some reason
 				Config2 = Config#config{ init = false },
 				application:set_env(arweave, config, Config2),
 				ar_weave:init(
@@ -133,8 +134,8 @@ handle_cast(join, State) ->
 			gen_server:cast(?MODULE, joining),
 			{noreply, State#state{joining = true}};
 		{[#block{} = GenesisB], true} ->
-			BI = [ar_util:block_index_entry_from_block(GenesisB)],
-			ar_events:send(node, {joined, BI, [GenesisB]}),
+			BIdx = [ar_util:block_index_entry_from_block(GenesisB)],
+			ar_events:send(node, {joined, BIdx, [GenesisB]}),
 			{noreply, State};
 		{BI, true} ->
 			?LOG_DEBUG("Node joined"),

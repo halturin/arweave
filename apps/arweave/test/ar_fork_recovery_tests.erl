@@ -19,6 +19,8 @@ test_height_plus_one_fork_recovery() ->
 	%% Expect the other one to recover.
 	{_SlaveNode, B0} = slave_start(no_block),
 	{_MasterNode, B0} = start(B0),
+	connect_to_slave(),
+	disconnect_from_slave(),
 	slave_mine(),
 	slave_wait_until_height(1),
 	connect_to_slave(),

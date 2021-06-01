@@ -170,6 +170,7 @@ keeps_txs_after_new_block(B0, FirstTXSetFuns, SecondTXSetFuns) ->
 	%% estimation from it.
 	FirstTXSet = lists:map(fun(TXFun) -> TXFun() end, FirstTXSetFuns),
 	SecondTXSet = lists:map(fun(TXFun) -> TXFun() end, SecondTXSetFuns),
+	connect_to_slave(), % make sure if we have peering connection with slave
 	%% Disconnect the nodes so that slave does not receive txs.
 	disconnect_from_slave(),
 	%% Post transactions from the first set to master.
@@ -699,7 +700,7 @@ joins_network_successfully() ->
 								{ok, {{<<"400">>, _}, _, <<"Invalid anchor (last_tx).">>, _, _}},
 								Reply
 							)
-					end	
+					end
 			end
 		end,
 		TXs

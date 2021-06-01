@@ -76,6 +76,17 @@ get_peers(Peer, _) ->
 			error
 	end.
 
+get_info(Peer, Name) when is_atom(Name) ->
+	case get_info(Peer, []) of
+		error ->
+			error;
+		not_found ->
+			not_found;
+		Info ->
+			{Name, X} = lists:keyfind(Name, 1, Info),
+			X
+	end;
+
 get_info(Peer, _) ->
 	?LOG_DEBUG("HTTP Client: get_info(). ~p", [Peer]),
 	case catch
@@ -375,15 +386,16 @@ process_get_info_json(JSON) ->
 	case ar_serialize:json_decode(JSON) of
 		{ok, {Props}} ->
 			process_get_info(Props);
-		{error, _} ->
-			info_unavailable
+		{error, E} ->
+			?LOG_DEBUG("Can't process JSON response (get_info): ~p", [E]),
+			error
 	end.
 
 process_get_info(Props) ->
 	Keys = [<<"network">>, <<"version">>, <<"height">>, <<"blocks">>, <<"peers">>],
 	case safe_get_vals(Keys, Props) of
 		error ->
-			info_unavailable;
+			error;
 		{ok, [NetworkName, ClientVersion, Height, Blocks, Peers]} ->
 			ReleaseNumber =
 				case lists:keyfind(<<"release">>, 1, Props) of
@@ -397,7 +409,9 @@ process_get_info(Props) ->
 				{blocks, Blocks},
 				{peers, Peers},
 				{release, ReleaseNumber}
-			]
+			];
+		_ ->
+			errror
 	end.
 
 safe_get_vals(Keys, Props) ->

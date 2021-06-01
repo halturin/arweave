@@ -6,21 +6,19 @@
 %% @doc Ensure that server info can be retreived via the HTTP interface.
 get_info_test() ->
 	ar_storage:clear(),
-	ar_test_node:disconnect_from_slave(),
-
 	ar_test_node:start(no_block),
-	?assertEqual(<<?NETWORK_NAME>>, ar_http_iface_client:get_info({127, 0, 0, 1, 1984}, name)),
-	?assertEqual({<<"release">>, ?RELEASE_NUMBER}, ar_http_iface_client:get_info({127, 0, 0, 1, 1984}, release)),
-	?assertEqual(?CLIENT_VERSION, ar_http_iface_client:get_info({127, 0, 0, 1, 1984}, version)),
-	?assertEqual(0, ar_http_iface_client:get_info({127, 0, 0, 1, 1984}, peers)),
+	?assertEqual(<<?NETWORK_NAME>>, ar_network_http_client:get_info({127, 0, 0, 1, 1984}, name)),
+	?assertEqual({<<"release">>, ?RELEASE_NUMBER}, ar_network_http_client:get_info({127, 0, 0, 1, 1984}, release)),
+	?assertEqual(?CLIENT_VERSION, ar_network_http_client:get_info({127, 0, 0, 1, 1984}, version)),
+	?assertEqual(0, ar_network_http_client:get_info({127, 0, 0, 1, 1984}, peers)),
 	ar_util:do_until(
 		fun() ->
-			1 == ar_http_iface_client:get_info({127, 0, 0, 1, 1984}, blocks)
+			1 == ar_network_http_client:get_info({127, 0, 0, 1, 1984}, blocks)
 		end,
 		100,
 		2000
 	),
-	?assertEqual(0, ar_http_iface_client:get_info({127, 0, 0, 1, 1984}, height)).
+	?assertEqual(0, ar_network_http_client:get_info({127, 0, 0, 1, 1984}, height)).
 
 %% @doc Ensure that transactions are only accepted once.
 single_regossip_test() ->
@@ -28,11 +26,11 @@ single_regossip_test() ->
 	TX = ar_tx:new(),
 	?assertMatch(
 		{ok, {{<<"200">>, _}, _, _, _, _}},
-		ar_http_iface_client:send_new_tx({127, 0, 0, 1, 1984}, TX)
+		ar_network_http_client:post_tx({127, 0, 0, 1, 1984}, TX)
 	),
 	?assertMatch(
 		{ok, {{<<"208">>, _}, _, _, _, _}},
-		ar_http_iface_client:send_new_tx({127, 0, 0, 1, 1984}, TX)
+		ar_network_http_client:post_tx({127, 0, 0, 1, 1984}, TX)
 	).
 
 %% @doc Unjoined nodes should not accept blocks

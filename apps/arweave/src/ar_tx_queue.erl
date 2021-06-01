@@ -19,6 +19,9 @@
 -export([
 	set_pause/1,
 	show_queue/0,
+	set_max_data_size/1,
+	set_max_header_size/1,
+	set_num_peers_tx_broadcast/1,
 	drop_tx/1,
 	utility/1
 ]).
@@ -34,7 +37,8 @@
 	max_data_size = ?TX_QUEUE_DATA_SIZE_LIMIT,
 	header_size = 0,
 	data_size = 0,
-	paused = false
+	paused = false,
+	num_peers_tx_broadcast = ?NUM_PEERS_TX_BROADCAST
 }).
 
 
@@ -46,6 +50,15 @@ set_pause(Paused) ->
 
 show_queue() ->
 	gen_server:call(?MODULE, show_queue).
+
+set_max_data_size(Bytes) ->
+	gen_server:call(?MODULE, {set_max_data_size, Bytes}).
+
+set_max_header_size(Bytes) ->
+	gen_server:call(?MODULE, {set_max_header_size, Bytes}).
+
+set_num_peers_tx_broadcast(N) when N > 0->
+	gen_server:call(?MODULE, {set_num_peers_tx_broadcast, N}).
 
 drop_tx(TX) ->
 	gen_server:call(?MODULE, {drop_tx, TX}).
@@ -98,11 +111,21 @@ handle_call({set_pause, false}, _From, State) when State#state.paused == true ->
 	gen_server:cast(?MODULE, process_queue),
 	{reply, ok, State#state{paused = false}};
 handle_call({set_pause, true}, _From, State) ->
+	?LOG_DEBUG("TX queue is set on pause"),
 	{reply, ok, State#state{paused = true}};
 
 handle_call(show_queue, _From, State) ->
 	Reply = show_queue(State#state.tx_queue),
 	{reply, Reply, State};
+
+handle_call({set_max_data_size, Bytes}, _From, State) ->
+	{reply, ok, State#state{ max_data_size = Bytes }};
+
+handle_call({set_max_header_size, Bytes}, _From, State) ->
+	{reply, ok, State#state{ max_header_size = Bytes }};
+
+handle_call({set_num_peers_tx_broadcast, N}, _From, State) ->
+	{reply, ok, State#state{ num_peers_tx_broadcast = N}};
 
 handle_call({drop_tx, TX}, _From, State) ->
 	#state{
@@ -137,7 +160,8 @@ handle_call(Request, _From, State) ->
 %%									{stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_cast(_Msg, State) when State#state.paused ->
+handle_cast(_Msg, State) when State#state.paused == true ->
+	?LOG_DEBUG("TX Queue is paused. Waiting..."),
 	{noreply, State};
 
 handle_cast(process_queue, State) when State#state.tx_queue == {0, nil} ->
@@ -149,13 +173,14 @@ handle_cast(process_queue, State) ->
 	#state{
 		tx_queue = Q,
 		header_size = HeaderSize,
-		data_size = DataSize
+		data_size = DataSize,
+		num_peers_tx_broadcast = NumPeersBroadcast
 	} = State,
 	{{_, {TX, {TXHeaderSize, TXDataSize}, FromPeerID}}, NewQ} = gb_sets:take_largest(Q),
 	ExcludePeers = #{FromPeerID => true},
 	BroadcastingStartedAt = erlang:timestamp(),
 	?LOG_DEBUG("TX Queue broadcast TXID ~p (exclude ~p)", [ar_util:encode(TX#tx.id), ExcludePeers]),
-	ar_network:broadcast(tx, TX, {ExcludePeers, ?PEERS_JOINED_MAX}),
+	ar_network:broadcast(tx, TX, {ExcludePeers, NumPeersBroadcast}),
 	BroadcastingTimeUs = timer:now_diff(erlang:timestamp(), BroadcastingStartedAt),
 	record_propagation_rate(tx_propagated_size(TX), BroadcastingTimeUs),
 	record_queue_size(gb_sets:size(NewQ)),
@@ -295,7 +320,7 @@ maybe_drop(Q, {HeaderSize, DataSize} = Size, {MaxHeaderSize, MaxDataSize} = MaxS
 
 show_queue(Q) ->
 	gb_sets:fold(
-		fun({_, {TX, _}, _}, Acc) ->
+		fun({_, {TX, _, _}}, Acc) ->
 			[{ar_util:encode(TX#tx.id), TX#tx.reward, TX#tx.data_size} | Acc]
 		end,
 		[],

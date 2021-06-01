@@ -21,7 +21,6 @@
 	get_block_txs_pairs/0,
 	mine/0,
 	add_tx/1,
-	add_peers/1,
 	get_mempool_size/0,
 	get_block_shadow_from_cache/1
 ]).
@@ -267,11 +266,5 @@ mine() ->
 %% the next block.
 %% @end
 add_tx(TX)->
-	gen_server:cast(ar_node_worker, {add_tx, TX}).
-
-%% @doc Request to add a list of peers to the node server loop.
-add_peers(Peer) when not is_list(Peer) ->
-	add_peers([Peer]);
-add_peers(Peers) ->
-	gen_server:cast(ar_node_worker, {add_peers, Peers}).
+	ar_events:send(tx, {new, TX, <<"">>}).
 

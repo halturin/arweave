@@ -162,7 +162,7 @@ handle_cast(_Msg, State) when State#state.fails > 3 ->
 	{stop, normal, State};
 
 handle_cast(validate_network, State) ->
-	case (State#state.module):get_info(State#state.peer_ipport, {}) of
+	case (State#state.module):get_info(State#state.peer_ipport, []) of
 		{ok, Info} when is_list(Info) ->
 			validate_network(Info,State);
 		_ ->

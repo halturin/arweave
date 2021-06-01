@@ -25,49 +25,48 @@
 -define(
 	CORE_TEST_MODS,
 	[
-		ar,
-		ar_meta_db,
-		ar_webhook_tests,
-		ar_poller_tests,
-		ar_kv,
-		ar_block_cache,
-		ar_unbalanced_merkle,
-		ar_intervals,
-		ar_ets_intervals,
-		ar_patricia_tree,
-		ar_diff_dag,
-		ar_config_tests,
-		ar_deep_hash,
-		ar_inflation,
-		ar_util,
-		ar_base64_compatibility_tests,
-		ar_storage,
-		ar_merkle,
-		ar_semaphore_tests,
-		ar_tx_db,
-		ar_tx,
-		ar_wallet,
-		ar_gossip,
-		ar_serialize,
-		ar_block,
-		ar_difficulty_tests,
-		ar_retarget,
-		ar_weave,
-		ar_tx_blacklist_tests,
-		ar_data_sync_tests,
-		ar_header_sync_tests,
-		ar_poa_tests,
-		ar_node_tests,
-		ar_fork_recovery_tests,
-		ar_mine,
-		ar_tx_replay_pool_tests,
-		ar_tx_queue,
+		ar, % ok
+		ar_meta_db, % ok
+		ar_webhook_tests, % ok
+		ar_poller_tests, % almost ok with timeout on the last step
+		ar_kv, % ok
+		ar_block_cache, % ok
+		ar_unbalanced_merkle, % ok
+		ar_intervals, % ok
+		ar_ets_intervals, % ok
+		ar_patricia_tree, % ok
+		ar_diff_dag, % ok
+		ar_config_tests, % ok
+		ar_deep_hash, % ok
+		ar_inflation, % ok
+		ar_util, % ok
+		ar_base64_compatibility_tests, % ok
+		ar_storage, % ok
+		ar_merkle, % ok
+		ar_semaphore_tests, % ok
+		ar_tx_db, % ok
+		ar_tx, % ok
+		ar_wallet, % ok
+		ar_serialize, % ok
+		ar_block, % ok
+		ar_difficulty_tests, % ok
+		ar_retarget, % fails
+		ar_weave, % no tests to run
+		ar_tx_blacklist_tests, % fails
+		ar_data_sync_tests, % ok
+		ar_header_sync_tests, % fails with the same issue as on ar_retarget
+		ar_poa_tests, % ok
+		ar_node_tests, % ok
+		ar_fork_recovery_tests, % ok
+		ar_mine, % ok
+		ar_tx_replay_pool_tests, %ok
+		ar_tx_queue, % almost ok, 2 tests fail
 		ar_http_iface_tests,
-		ar_multiple_txs_per_wallet_tests,
-		ar_pricing,
-		ar_gateway_middleware_tests,
-		ar_http_util_tests,
-		ar_mine_randomx_tests
+		ar_multiple_txs_per_wallet_tests, % ok, but it has race conditional issue
+		ar_pricing, % ok
+		ar_gateway_middleware_tests, % ok
+		ar_http_util_tests, % ok
+		ar_mine_randomx_tests % ok
 	]
 ).
 

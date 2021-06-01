@@ -29,7 +29,7 @@ test_txs_broadcast_order() ->
 	%% the order in which transactions are
 	%% received by the node can be asserted.
 
-	% deprecated method ar_tx_queue:set_max_emitters(1),
+	ar_tx_queue:set_num_peers_tx_broadcast(1),
 	assert_post_tx_to_slave(TX1),
 	assert_post_tx_to_slave(TX2),
 	assert_post_tx_to_slave(TX3),
@@ -84,7 +84,7 @@ test_drop_lowest_priority_txs() ->
 	LowerPriorityTXs = make_txs(4),
 	lists:foreach(
 		fun(TX) ->
-			ar_http_iface_client:send_new_tx({127, 0, 0, 1, 1984}, TX)
+			ar_network_http_client:post_tx({127,0,0,1,1984}, TX)
 		end,
 		LowerPriorityTXs
 	),
@@ -101,14 +101,14 @@ test_drop_lowest_priority_txs() ->
 	],
 	lists:foreach(
 		fun(TX) ->
-			ar_http_iface_client:send_new_tx({127, 0, 0, 1, 1984}, TX)
+			ar_network_http_client:post_tx({127,0,0,1,1984}, TX)
 		end,
 		HighestPriorityTXs
 	),
 	Actual2 = [TXID || {[{_, TXID}, _, _]} <- http_get_queue()],
 	?assertEqual(encode_txs(HighestPriorityTXs), Actual2),
 	%% Set max data size. Submit some lower-priority format=2 txs. Expect
-	%% those exceeding the new limit to be dropped.
+	%% will drop those exceeding the new limit.
 	ar_tx_queue:set_max_header_size(9 * ?TX_SIZE_BASE + 1),
 	ar_tx_queue:set_max_data_size(2),
 	LowerPriorityFormat2TXs = [
@@ -119,7 +119,7 @@ test_drop_lowest_priority_txs() ->
 	],
 	lists:foreach(
 		fun(TX) ->
-			ar_http_iface_client:send_new_tx({127, 0, 0, 1, 1984}, TX)
+			ar_network_http_client:post_tx({127,0,0,1,1984}, TX)
 		end,
 		LowerPriorityFormat2TXs
 	),
@@ -286,7 +286,7 @@ import_4_txs() ->
 	TX4 = ar_tx:new(<<"DATA4data4">>, ?AR(80)),
 	lists:foreach(
 		fun(TX) ->
-			ar_http_iface_client:send_new_tx({127, 0, 0, 1, 1984}, TX)
+			ar_network_http_client:post_tx({127,0,0,1,1984}, TX)
 		end,
 		[TX1, TX2, TX3, TX4]
 	),

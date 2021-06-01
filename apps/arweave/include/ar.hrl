@@ -264,6 +264,9 @@
 %% Default TCP port.
 -define(DEFAULT_HTTP_IFACE_PORT, 1984).
 
+%% The number of peers should receive the broadcasted TX.
+-define(NUM_PEERS_TX_BROADCAST, 2).
+
 %% Number of the mining processes to spawn. For SPoRA mining, the optimal number
 %% is the smallest one that saturates disk IO.
 -define(NUM_MINING_PROCESSES, 10).
