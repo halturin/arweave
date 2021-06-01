@@ -87,7 +87,7 @@ handle(Peer, Req, Pid) ->
 				{event, http_request},
 				{method, Method},
 				{path, SplitPath},
-				{peer, ar_util:format_peer(Peer)}
+				{peer, Peer}
 			]);
 		_ ->
 			do_nothing
@@ -1483,7 +1483,8 @@ post_block(check_indep_hash, {BShadow, OrigPeer}, Req, ReceiveTimestamp) ->
 							);
 						_ ->
 							post_block_reject_warn(BShadow, check_indep_hash, OrigPeer),
-							ar_blacklist_middleware:ban_peer(OrigPeer, ?BAD_POW_BAN_TIME),
+							{PeerIP, _TcpPeerPort} = cowboy_req:peer(Req),
+							ar_blacklist_middleware:ban_peer(PeerIP, ?BAD_POW_BAN_TIME),
 							{400, #{}, <<"Invalid Block Hash">>, Req}
 					end
 			end
@@ -1541,7 +1542,8 @@ post_block(check_pow, {BShadow, OrigPeer, BDS, PrevB}, Req, ReceiveTimestamp) ->
 			post_block(post_block, {BShadow, OrigPeer, BDS}, Req, ReceiveTimestamp);
 		false ->
 			post_block_reject_warn(BShadow, check_pow, OrigPeer),
-			ar_blacklist_middleware:ban_peer(OrigPeer, ?BAD_POW_BAN_TIME),
+			{PeerIP, _TcpPeerPort} = cowboy_req:peer(Req),
+			ar_blacklist_middleware:ban_peer(PeerIP, ?BAD_POW_BAN_TIME),
 			{400, #{}, <<"Invalid Block Proof of Work">>, Req}
 	end;
 post_block(post_block, {BShadow, OrigPeer, _BDS}, Req, ReceiveTimestamp) ->
@@ -1597,7 +1599,7 @@ post_block_reject_warn(BShadow, Step, Peer) ->
 		{event, post_block_rejected},
 		{hash, ar_util:encode(BShadow#block.indep_hash)},
 		{step, Step},
-		{peer, ar_util:format_peer(Peer)}
+		{peer, Peer}
 	]).
 
 post_block_reject_warn(BShadow, Step, Peer, Params) ->
@@ -1606,7 +1608,7 @@ post_block_reject_warn(BShadow, Step, Peer, Params) ->
 		{hash, ar_util:encode(BShadow#block.indep_hash)},
 		{step, Step},
 		{params, Params},
-		{peer, ar_util:format_peer(Peer)}
+		{peer, Peer}
 	]).
 
 record_block_pre_validation_time(ReceiveTimestamp) ->

@@ -39,13 +39,14 @@ start() ->
 
 %% Ban a peer completely for TTLSeconds seoncds. Since we cannot trust the port,
 %% we ban the whole IP address.
-ban_peer(Peer, TTLSeconds) ->
-	Key = {ban, peer_to_ip_addr(Peer)},
+ban_peer(PeerIP, TTLSeconds) ->
+	Key = {ban, PeerIP},
 	Expires = os:system_time(seconds) + TTLSeconds,
 	ets:insert(?MODULE, {Key, Expires}).
 
 is_ip_banned(PeerIP) ->
-	case ets:lookup(?MODULE, PeerIP) of
+	Key = {ban, PeerIP},
+	case ets:lookup(?MODULE, Key) of
 		[] -> not_banned;
 		[_] -> banned
 	end.
@@ -130,8 +131,6 @@ update_ip_addr(IpAddr, Req, Diff) ->
 requesting_ip_addr(Req) ->
 	{IpAddr, _} = cowboy_req:peer(Req),
 	IpAddr.
-
-peer_to_ip_addr({A, B, C, D, _}) -> {A, B, C, D}.
 
 get_key_limit(Req) ->
 	Path = ar_http_iface_server:split_path(cowboy_req:path(Req)),

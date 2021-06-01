@@ -13,9 +13,11 @@
 	get_time/2,
 	get_peers/2,
 	get_info/2,
+	get_height/2,
 	get_block_index/2,
 	get_block/2,
 	get_tx/2,
+	get_tx_data/2,
 	get_wallet_list/2,
 	get_wallet_list_chunk/2,
 	get_chunk/2,
@@ -82,7 +84,7 @@ get_info(Peer, Name) when is_atom(Name) ->
 			error;
 		not_found ->
 			not_found;
-		Info ->
+		{ok, Info} ->
 			{Name, X} = lists:keyfind(Name, 1, Info),
 			X
 	end;
@@ -105,6 +107,26 @@ get_info(Peer, _) ->
 			not_found;
 		E ->
 			?LOG_DEBUG("HTTP Client error: get_info() ~p", [E]),
+			error
+	end.
+
+%% @doc Return the current height of a remote node.
+get_height(Peer, _) ->
+	?LOG_DEBUG("HTTP Client: get_height(). ~p", [Peer]),
+	case catch
+		ar_http:req(#{
+			method => get,
+			peer => Peer,
+			path => "/height",
+			headers => p2p_headers(),
+			connect_timeout => 500,
+			timeout => 2 * 1000
+		})
+	of
+		{ok, {{<<"200">>, _}, _, Body, _, _}} ->
+			{ok, binary_to_integer(Body)};
+		E ->
+			?LOG_DEBUG("HTTP Client error: get_height() ~p", [E]),
 			error
 	end.
 
@@ -189,7 +211,31 @@ get_tx(Peer, TXID) ->
 			error
 	end.
 
-
+get_tx_data(Peer, TXID) ->
+	?LOG_DEBUG("HTTP Client: get_tx_data(~p). ~p", [TXID, Peer]),
+	case catch
+		ar_http:req(#{
+			method => get,
+			peer => Peer,
+			path => "/tx/" ++ binary_to_list(ar_util:encode(TXID)) ++ "/data",
+			headers => p2p_headers(),
+			connect_timeout => 500,
+			timeout => 120 * 1000,
+			limit => ?MAX_BODY_SIZE
+		})
+	of
+		{ok, {{<<"200">>, _}, _, <<>>, _, _}} ->
+			empty;
+		{ok, {{<<"200">>, _}, _, EncodedData, _, _}} ->
+			case ar_util:safe_decode(EncodedData) of
+				{ok, Data} ->
+					{ok, Data};
+				{error, invalid} ->
+					error
+			end;
+		_ ->
+			empty
+	end.
 
 %% @doc Get a bunch of wallets by the given root hash from external peers.
 get_wallet_list_chunk(Peer, {H, Cursor}) ->
@@ -311,8 +357,12 @@ post_tx(Peer, TX) ->
 			timeout => max(3, min(60, TX1Size * 8 div ?TX_PROPAGATION_BITS_PER_SECOND)) * 1000
 	})
 	of
-		{ok, _} ->
+		{ok, {{<<"200">>, _}, _, _Body, _, _}} ->
 			{ok, sent};
+		{ok, {{<<"208">>, _}, _, _Body, _, _}} ->
+			{ok, duplicate};
+		{ok, {{<<"429">>, <<"Too Many Requests">>}, _, _Body, _, _}} ->
+			{ok, too_many_requests};
 		E ->
 			?LOG_DEBUG("HTTP Client error: post_tx() ~p", [E]),
 			error
@@ -366,8 +416,18 @@ post_block(Peer, Block) ->
 			timeout => 3 * 1000
 		})
 	of
-		{ok, _} ->
+		{ok, {{<<"400">>, _}, _, <<"Invalid Block Hash">>, _, _}} ->
+			{ok, invalid_block_hash};
+		{ok, {{<<"400">>, _}, _, <<"Invalid timestamp.">>, _, _}} ->
+			{ok, invalid_timestamp};
+		{ok, {{<<"403">>, _}, _, <<"IP address blocked due to previous request.">>, _, _}} ->
+			{ok, ip_blocked};
+		{ok, {{<<"200">>, _}, _, _, _, _}} ->
 			{ok, sent};
+		{ok, {{<<"208">>, _}, _, <<"Block already processed.">>, _, _}} ->
+			{ok, already_processed};
+		{ok, {{<<"400">>, _}, _, <<"Invalid Block Proof of Work">>, _, _}} ->
+			{ok, invalid_pow};
 		E ->
 			?LOG_DEBUG("HTTP Client error: post_block() ~p", [E]),
 			error
