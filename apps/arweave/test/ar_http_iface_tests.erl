@@ -70,9 +70,9 @@ node_blacklisting_post_spammer_test_1() ->
 -spec get_fun_msg_pair(atom()) -> {fun(), any()}.
 get_fun_msg_pair(get_info) ->
 	{ fun(_) ->
-			ar_network_http_client:get_info({127, 0, 0, 1, 1984})
+			ar_network_http_client:get_info({127, 0, 0, 1, 1984}, [])
 		end
-	, info_unavailable};
+	, error};
 get_fun_msg_pair(send_new_tx) ->
 	{ fun(_) ->
 			InvalidTX = (ar_tx:new())#tx { owner = <<"key">>, signature = <<"invalid">> },
@@ -89,8 +89,6 @@ get_fun_msg_pair(send_new_tx) ->
 %% to an ar_util:pmap/2 call fails the tests currently.
 -spec node_blacklisting_test_frame(fun(), any(), non_neg_integer(), non_neg_integer()) -> ok.
 node_blacklisting_test_frame(RequestFun, ErrorResponse, NRequests, ExpectedErrors) ->
-	ar_test_node:connect_to_slave(), % to make sure if we have peering with slave
-	ar_test_node:disconnect_from_slave(),
 	ar_blacklist_middleware:reset(),
 	Responses = lists:map(RequestFun, lists:seq(1, NRequests)),
 	?assertEqual(length(Responses), NRequests),
@@ -285,7 +283,7 @@ get_non_existent_block_test_1() ->
 		}).
 
 %% @doc A test for retrieving format=2 transactions from HTTP API.
-get_format_2_tx_test_1_failed() ->
+get_format_2_tx_test_failed() ->
 	[B0] = ar_weave:init(),
 	{_Node, _} = ar_test_node:start(B0),
 	DataRoot = (ar_tx:generate_chunk_tree(#tx{ data = <<"DATA">> }))#tx.data_root,
@@ -389,7 +387,7 @@ add_external_tx_with_tags_test_1() ->
 	?assertEqual(TaggedTX, ar_storage:read_tx(hd(B1#block.txs))).
 
 %% @doc Test getting transactions
-find_external_tx_test_1_failed() ->
+find_external_tx_test_1() ->
 	[B0] = ar_weave:init(),
 	{_Node, _} = ar_test_node:start(B0),
 	ar_network_http_client:post_tx({127, 0, 0, 1, 1984}, TX = ar_tx:new(<<"DATA">>)),
@@ -401,6 +399,8 @@ find_external_tx_test_1_failed() ->
 			fun() ->
 				case ar_network_http_client:get_tx({127, 0, 0, 1, 1984}, TX#tx.id) of
 					not_found ->
+						false;
+					error ->
 						false;
 					TX ->
 						{ok, TX#tx.id}
@@ -552,7 +552,7 @@ update_block_timestamp(B, Timestamp) ->
 	B3#block{ indep_hash = ar_weave:indep_hash(B3) }.
 
 %% @doc Post a tx to the network and ensure that last_tx call returns the ID of last tx.
-add_tx_and_get_last_test() ->
+add_tx_and_get_last_test_1() ->
 	{Priv1, Pub1} = ar_wallet:new(),
 	[B0] = ar_weave:init([{ar_wallet:to_address(Pub1), ?AR(10000), <<>>}]),
 	{_Node, _} = ar_test_node:start(B0),
@@ -573,7 +573,7 @@ add_tx_and_get_last_test() ->
 	?assertEqual(ID, ar_util:decode(Body)).
 
 %% @doc Post a tx to the network and ensure that its subfields can be gathered
-get_subfields_of_tx_test() ->
+get_subfields_of_tx_test_1() ->
 	[B0] = ar_weave:init(),
 	{_Node, _} = ar_test_node:start(B0),
 	ar_network_http_client:post_tx({127, 0, 0, 1, 1984}, TX = ar_tx:new(<<"DATA">>)),
@@ -591,7 +591,7 @@ get_subfields_of_tx_test() ->
 	?assertEqual(Orig, ar_util:decode(Body)).
 
 %% @doc Correctly check the status of pending is returned for a pending transaction
-get_pending_tx_test() ->
+get_pending_tx_test_1() ->
 	[B0] = ar_weave:init(),
 	{_Node, _} = ar_test_node:start(B0),
 	ar_network_http_client:post_tx({127, 0, 0, 1, 1984}, TX = ar_tx:new(<<"DATA1">>)),
@@ -620,7 +620,7 @@ get_tx_body_test_1() ->
 		ar_network_http_client:get_tx_data({127,0,0,1,1984}, TX#tx.id)
 	).
 
-get_txs_by_send_recv_test_() ->
+get_txs_by_send_recv_test__1() ->
 	{timeout, 60, fun() ->
 		{Priv1, Pub1} = ar_wallet:new(),
 		{Priv2, Pub2} = ar_wallet:new(),
@@ -677,7 +677,9 @@ get_txs_by_send_recv_test_() ->
 			))
 	end}.
 
-get_tx_status_test() ->
+get_tx_status_test__1() ->
+	{timeout, 20, fun get_tx_status_test_run/0}.
+get_tx_status_test_run() ->
 	[B0] = ar_weave:init([]),
 	{_Node, _} = ar_test_node:start(B0),
 	TX = (ar_tx:new())#tx{ tags = [{<<"TestName">>, <<"TestVal">>}] },
@@ -730,7 +732,7 @@ get_tx_status_test() ->
 	ar_test_node:wait_until_height(3),
 	?assertMatch({ok, {{<<"404">>, _}, _, _, _, _}}, FetchStatus()).
 
-post_unsigned_tx_test_() ->
+post_unsigned_tx_test__1() ->
 	{timeout, 20, fun post_unsigned_tx/0}.
 
 post_unsigned_tx() ->
@@ -834,7 +836,7 @@ post_unsigned_tx() ->
 		maps:from_list(GetTXRes)
 	).
 
-get_wallet_txs_test_() ->
+get_wallet_txs_test_1() ->
 	{timeout, 10, fun() ->
 		{_, Pub} = ar_wallet:new(),
 		WalletAddress = binary_to_list(ar_util:encode(ar_wallet:to_address(Pub))),
@@ -911,7 +913,7 @@ get_wallet_txs_test_() ->
 		?assertEqual([ar_util:encode(SecondTX#tx.id)], OneSecondTX)
 	end}.
 
-get_wallet_deposits_test_() ->
+get_wallet_deposits_test_1() ->
 	{timeout, 10, fun() ->
 		%% Create a wallet to transfer tokens to
 		{_, PubTo} = ar_wallet:new(),
@@ -991,7 +993,7 @@ get_error_of_data_limit_test() ->
 	[B0] = ar_weave:init(),
 	{_Node, _} = ar_test_node:start(B0),
 	Limit = 1460,
-	ar_http_iface_client:send_new_tx(
+	ar_network_http_client:post_tx(
 		{127, 0, 0, 1, 1984},
 		TX = ar_tx:new(<< <<0>> || _ <- lists:seq(1, Limit * 2) >>)
 	),

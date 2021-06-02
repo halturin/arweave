@@ -61,7 +61,7 @@ set_num_peers_tx_broadcast(N) when N > 0->
 	gen_server:call(?MODULE, {set_num_peers_tx_broadcast, N}).
 
 drop_tx(TX) ->
-	gen_server:call(?MODULE, {drop_tx, TX}).
+	gen_server:cast(?MODULE, {drop_tx, TX}).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -127,25 +127,6 @@ handle_call({set_max_header_size, Bytes}, _From, State) ->
 handle_call({set_num_peers_tx_broadcast, N}, _From, State) ->
 	{reply, ok, State#state{ num_peers_tx_broadcast = N}};
 
-handle_call({drop_tx, TX}, _From, State) ->
-	#state{
-		tx_queue = Q,
-		header_size = HeaderSize,
-		data_size = DataSize
-	} = State,
-	{TXHeaderSize, TXDataSize} = tx_queue_size(TX),
-	U = utility(TX),
-	Item = {U, {TX, {TXHeaderSize, TXDataSize}}},
-	case gb_sets:is_element(Item, Q) of
-		true ->
-			{reply, ok, State#state{
-				tx_queue = gb_sets:del_element(Item, Q),
-				header_size = HeaderSize - TXHeaderSize,
-				data_size = DataSize - TXDataSize
-			}};
-		false ->
-			{reply, not_found, State}
-	end;
 
 handle_call(Request, _From, State) ->
 	?LOG_ERROR("unhandled call: ~p", [Request]),
@@ -176,8 +157,9 @@ handle_cast(process_queue, State) ->
 		data_size = DataSize,
 		num_peers_tx_broadcast = NumPeersBroadcast
 	} = State,
-	{{_, {TX, {TXHeaderSize, TXDataSize}, FromPeerID}}, NewQ} = gb_sets:take_largest(Q),
-	ExcludePeers = #{FromPeerID => true},
+	{{_, {TX, {TXHeaderSize, TXDataSize}}}, NewQ} = gb_sets:take_largest(Q),
+	% ExcludePeers = #{FromPeerID => true},
+	ExcludePeers = #{},
 	BroadcastingStartedAt = erlang:timestamp(),
 	?LOG_DEBUG("TX Queue broadcast TXID ~p (exclude ~p)", [ar_util:encode(TX#tx.id), ExcludePeers]),
 	ar_network:broadcast(tx, TX, {ExcludePeers, NumPeersBroadcast}),
@@ -198,6 +180,26 @@ handle_cast(process_queue, State) ->
 handle_cast({send_to_mining_pool, TX}, State) ->
 	ar_events:send(tx, {mine, TX}),
 	{noreply, State};
+
+handle_cast({drop_tx, TX}, State) ->
+	#state{
+		tx_queue = Q,
+		header_size = HeaderSize,
+		data_size = DataSize
+	} = State,
+	{TXHeaderSize, TXDataSize} = tx_queue_size(TX),
+	U = utility(TX),
+	Item = {U, {TX, {TXHeaderSize, TXDataSize}}},
+	case gb_sets:is_element(Item, Q) of
+		true ->
+			{noreply, State#state{
+				tx_queue = gb_sets:del_element(Item, Q),
+				header_size = HeaderSize - TXHeaderSize,
+				data_size = DataSize - TXDataSize
+			}};
+		false ->
+			{noreply, State}
+	end;
 
 handle_cast(Msg, State) ->
 	?LOG_ERROR([{event, unhandled_cast}, {message, Msg}]),
@@ -226,7 +228,7 @@ handle_info({event, tx, {new, TX, FromPeerID}}, State) ->
 	U = utility(TX),
 	{NewQ, {NewHeaderSize, NewDataSize}, DroppedTXs} =
 		maybe_drop(
-			gb_sets:add_element({U, {TX, {TXHeaderSize, TXDataSize}, FromPeerID}}, Q),
+			gb_sets:add_element({U, {TX, {TXHeaderSize, TXDataSize}}}, Q),
 			{HeaderSize + TXHeaderSize, DataSize + TXDataSize},
 			{MaxHeaderSize, MaxDataSize}
 		),
@@ -236,6 +238,7 @@ handle_info({event, tx, {new, TX, FromPeerID}}, State) ->
 		_ ->
 			DroppedIDs = lists:map(
 				fun(DroppedTX) ->
+					gen_server:cast(?MODULE, {drop_tx, DroppedTX}),
 					case TX#tx.format of
 						2 ->
 							ar_data_sync:maybe_drop_data_root_from_disk_pool(

@@ -7,6 +7,7 @@
 
 -export([
 	get_blocks/0,
+	get_block/1,
 	get_block_index/0, is_in_block_index/1, get_height/0,
 	get_balance/1,
 	get_last_tx/1,
@@ -14,6 +15,7 @@
 	get_wallet_list_chunk/2,
 	get_current_diff/0, get_diff/0,
 	get_pending_txs/0, get_pending_txs/1, get_ready_for_mining_txs/0, is_a_pending_tx/1,
+	get_tx/1, get_txs/1,
 	get_current_block_hash/0,
 	get_block_index_entry/1,
 	get_2_0_hash_of_1_0_block/1,
@@ -46,6 +48,49 @@ get_block_index() ->
 		_ ->
 			[]
 	end.
+
+%% @doc Get Block with the given height. First, it tries to find this block locally
+%% if it wasn't found, it tries to find it in the arweave network
+%% @end
+get_block(Height) ->
+	case ar_storage:read_block(Height) of
+		unavailable ->
+			case ar_network:get_block_shadow(Height) of
+				unavailable ->
+					unavailable;
+				B ->
+					B
+			end;
+		BShadow ->
+			case get_txs(BShadow#block.txs) of
+				unavailable ->
+					unavailable;
+				TXs ->
+					BShadow#block { txs = TXs }
+			end
+	end.
+%% @doc Get TX with the given TXID. It behave the same as get_block - tries
+%% to find it in mempool, on disk, in the arweave-network
+%% @end
+get_tx(TXID) ->
+	get_txs([TXID]).
+
+%% @doc Get multiple TXs by their IDs
+%% @end
+get_txs([]) ->
+	[];
+get_txs(TXIDs) when is_list(TXIDs) ->
+	lists:foldr(fun(_, unavailable) ->
+						unavailable;
+					(TXID, Acc) ->
+						case get_tx_from_mempool(TXID) of
+							unavailable ->
+								unavailable;
+							TX ->
+								[ TX | Acc ]
+						end
+	end, [], TXIDs).
+
 
 %% @doc Get pending transactions. This includes:
 %% 1. The transactions currently staying in the priority queue.
@@ -268,3 +313,31 @@ mine() ->
 add_tx(TX)->
 	ar_events:send(tx, {new, TX, <<"">>}).
 
+%%
+%% Private functions
+%%
+
+get_tx_from_mempool(TXID) ->
+	MempoolTXs = get_pending_txs([as_map]),
+	case maps:get(TXID, MempoolTXs, not_in_mempool) of
+		not_in_mempool ->
+			get_tx_from_disk(TXID);
+		TX ->
+			TX
+	end.
+
+get_tx_from_disk(TXID) ->
+	case ar_storage:read_tx(TXID) of
+		unavailable ->
+			get_tx_from_network(TXID);
+		TX ->
+			TX
+	end.
+
+get_tx_from_network(TXID) ->
+	case ar_network:get_tx(TXID) of
+		TX when is_record(TX, tx) ->
+			TX;
+		_ ->
+			unavailable
+	end.

@@ -159,7 +159,11 @@ get_block_shadow(B) ->
 			unavailable;
 		Block when ?IS_BLOCK(Block) ->
 			Block;
-		_ ->
+		{nopeers, _} ->
+			?LOG_DEBUG("get_block_shadow(~p) returned 'nopeers'", [B]),
+			unavailable;
+		E ->
+			?LOG_ERROR("get_block_shadow(~p) returned ~p", [B, E]),
 			unavailable
 	end.
 get_block(B) ->
@@ -611,9 +615,11 @@ request(Type, {Request, Args}) ->
 
 request(sequential, {Request, Args}, Timeout) ->
 	Peers = peers_top_joined(),
+	?LOG_ERROR("AAAAA ~p", [Peers]),
 	do_request_sequential({Request, Args}, Timeout, Peers);
 request({sequential, Max}, {Request, Args}, Timeout) ->
 	Peers = lists:sublist(peers_top_joined(), Max),
+	?LOG_ERROR("BBBBB ~p", [{Peers, Max}]),
 	do_request_sequential({Request, Args}, Timeout, Peers);
 
 request(broadcast, {Request, Args}, Timeout) ->
