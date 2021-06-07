@@ -55,10 +55,10 @@ get_block_index() ->
 get_block(Height) ->
 	case ar_storage:read_block(Height) of
 		unavailable ->
-			case ar_network:get_block_shadow(Height) of
+			case ar_network:get_block(Height) of
 				unavailable ->
 					unavailable;
-				B ->
+				B->
 					B
 			end;
 		BShadow ->
