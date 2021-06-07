@@ -69,7 +69,6 @@ test_polling() ->
 	connect_to_slave(),
 	slave_mine(),
 	[{SH14, _, _} | _] = slave_wait_until_height(14),
-	?LOG_ERROR("SOMETIMES FAILS HERE"),
 	[{MH14, _, _}, {MH13_1, _, _}, {MH12_1, _, _}, {MH11_1, _, _} | _] = wait_until_height(14),
 	?assertEqual(MH14, SH14),
 	?assertEqual(SH13, MH13_1),

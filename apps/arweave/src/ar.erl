@@ -28,7 +28,7 @@
 		ar, % ok
 		ar_meta_db, % ok
 		ar_webhook_tests, % ok
-		ar_poller_tests, % almost ok with timeout on the last step
+		ar_poller_tests, % ok
 		ar_kv, % ok
 		ar_block_cache, % ok
 		ar_unbalanced_merkle, % ok
@@ -50,19 +50,19 @@
 		ar_serialize, % ok
 		ar_block, % ok
 		ar_difficulty_tests, % ok
-		ar_retarget, % fails
+		ar_retarget, % ok
 		ar_weave, % no tests to run
 		ar_tx_blacklist_tests, % fails
 		ar_data_sync_tests, % ok
-		ar_header_sync_tests, % fails with the same issue as on ar_retarget
+		ar_header_sync_tests, % fails
 		ar_poa_tests, % ok
-		ar_node_tests, % ok
+		ar_node_tests, % ok (but slave log has an exception message got_unexpected_wallet_list_chunk_deserialization_result)
 		ar_fork_recovery_tests, % ok
 		ar_mine, % ok
-		ar_tx_replay_pool_tests, %ok
+		ar_tx_replay_pool_tests, % ok
 		ar_tx_queue, % almost ok, 2 tests fail
 		ar_http_iface_tests,
-		ar_multiple_txs_per_wallet_tests, % ok, but it has race conditional issue
+		ar_multiple_txs_per_wallet_tests, % ok
 		ar_pricing, % ok
 		ar_gateway_middleware_tests, % ok
 		ar_http_util_tests, % ok

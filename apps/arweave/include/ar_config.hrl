@@ -11,7 +11,7 @@
 
 %% The polling frequency in seconds.
 -ifdef(DEBUG).
--define(DEFAULT_POLLING_INTERVAL, 5).
+-define(DEFAULT_POLLING_INTERVAL, 3).
 -else.
 -define(DEFAULT_POLLING_INTERVAL, 60).
 -endif.

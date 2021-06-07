@@ -3,7 +3,7 @@
 -include_lib("arweave/include/ar.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
--import(ar_test_node, [assert_post_tx_to_slave/1, disconnect_from_slave/0]).
+-import(ar_test_node, [assert_post_tx_to_slave/2, disconnect_from_slave/0]).
 -import(ar_test_node, [assert_wait_until_receives_txs/1, wait_until_height/1]).
 -import(ar_test_node, [sign_tx/2, sign_v1_tx/2, get_tx_anchor/0]).
 -import(ar_test_node, [get_tx_price/1, slave_mine/0, slave_call/3, connect_to_slave/0]).
@@ -30,10 +30,10 @@ test_txs_broadcast_order() ->
 	%% received by the node can be asserted.
 
 	ar_tx_queue:set_num_peers_tx_broadcast(1),
-	assert_post_tx_to_slave(TX1),
-	assert_post_tx_to_slave(TX2),
-	assert_post_tx_to_slave(TX3),
-	assert_post_tx_to_slave(TX4),
+	assert_post_tx_to_slave(TX1, false),
+	assert_post_tx_to_slave(TX2, false),
+	assert_post_tx_to_slave(TX3, false),
+	assert_post_tx_to_slave(TX4, false),
 	ar_util:do_until(
 		fun() ->
 			case length(ar_tx_queue:show_queue()) of
@@ -84,7 +84,7 @@ test_drop_lowest_priority_txs() ->
 	LowerPriorityTXs = make_txs(4),
 	lists:foreach(
 		fun(TX) ->
-			ar_network_http_client:post_tx({127,0,0,1,1984}, TX)
+			ar_test_node:post_tx_to_master(TX, false)
 		end,
 		LowerPriorityTXs
 	),
@@ -101,7 +101,7 @@ test_drop_lowest_priority_txs() ->
 	],
 	lists:foreach(
 		fun(TX) ->
-			ar_network_http_client:post_tx({127,0,0,1,1984}, TX)
+			ar_test_node:post_tx_to_master(TX, false)
 		end,
 		HighestPriorityTXs
 	),
@@ -119,7 +119,7 @@ test_drop_lowest_priority_txs() ->
 	],
 	lists:foreach(
 		fun(TX) ->
-			ar_network_http_client:post_tx({127,0,0,1,1984}, TX)
+			ar_test_node:post_tx_to_master(TX, false)
 		end,
 		LowerPriorityFormat2TXs
 	),
@@ -171,7 +171,7 @@ test_txs_are_included_in_blocks_sorted_by_utility() ->
 	lists:foldl(
 		fun(_, ToPost) ->
 			TX = ar_util:pick_random(ToPost),
-			assert_post_tx_to_slave(TX),
+			assert_post_tx_to_slave(TX, false),
 			ToPost -- [TX]
 		end,
 		TXs,
@@ -199,7 +199,7 @@ format_2_txs_are_gossiped() ->
 	TXParams = #{format => 2, data => <<"TXDATA">>, reward => ?AR(1)},
 	SignedTX = sign_tx(Wallet, TXParams),
 	SignedTXHeader = SignedTX#tx{ data = <<>> },
-	assert_post_tx_to_slave(SignedTX),
+	assert_post_tx_to_slave(SignedTX, false),
 	assert_wait_until_receives_txs([SignedTXHeader]),
 	slave_mine(),
 	BI = wait_until_height(1),
@@ -233,7 +233,7 @@ test_tx_is_dropped_after_it_is_included() ->
 	ar_tx_queue:set_pause(true),
 	lists:foreach(
 		fun(TX) ->
-			assert_post_tx_to_slave(TX)
+			assert_post_tx_to_slave(TX, true)
 		end,
 		CommittedTXs
 	),
@@ -286,7 +286,7 @@ import_4_txs() ->
 	TX4 = ar_tx:new(<<"DATA4data4">>, ?AR(80)),
 	lists:foreach(
 		fun(TX) ->
-			ar_network_http_client:post_tx({127,0,0,1,1984}, TX)
+			ar_test_node:post_tx_to_master(TX, false)
 		end,
 		[TX1, TX2, TX3, TX4]
 	),

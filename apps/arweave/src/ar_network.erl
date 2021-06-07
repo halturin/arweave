@@ -615,7 +615,6 @@ request(Type, {Request, Args}) ->
 
 request(sequential, {Request, Args}, Timeout) ->
 	Peers = peers_top_joined(),
-	?LOG_ERROR("AAAAA ~p", [Peers]),
 	do_request_sequential({Request, Args}, Timeout, Peers);
 request({sequential, Max}, {Request, Args}, Timeout) ->
 	Peers = lists:sublist(peers_top_joined(), Max),

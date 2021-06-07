@@ -60,6 +60,7 @@ init([]) ->
 	?LOG_INFO([{event, ar_poller_start}]),
 	{ok, Config} = application:get_env(arweave, config),
 	ar_events:subscribe([node, network]),
+	?LOG_DEBUG("Polling interval ~p sec", [Config#config.polling * 1000]),
 	gen_server:cast(?MODULE, poll),
 	{ok, #state{
 		joined = ar_node:is_joined(),
@@ -105,9 +106,10 @@ handle_cast(poll, State) when not State#state.joined->
 	{noreply, State};
 
 handle_cast(poll, State) ->
-	?LOG_DEBUG("Polling. Checking current height ..."),
+	?LOG_DEBUG("Polling. Checking current height (last seen: ~p)...", [State#state.last_seen_height]),
 	case ar_node:get_height() of
 		Height when Height > State#state.last_seen_height ->
+			?LOG_DEBUG("updated last seen height: ~p", [Height]),
 			{ok, T} = timer:send_after(State#state.interval, {'$gen_cast', poll}),
 			{noreply, State#state{poll_timer = T, last_seen_height = Height}};
 		Height ->

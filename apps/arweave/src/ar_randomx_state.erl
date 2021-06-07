@@ -267,10 +267,11 @@ get_block(Height, BI) when is_integer(Height) ->
 	{BH, _, _} = lists:nth(Height + 1, lists:reverse(BI)),
 	get_block(BH, BI);
 get_block(BH, BI) ->
-	case ar_network:get_block(BH) of
+	case ar_node:get_block(BH) of
 		unavailable ->
 			unavailable;
 		B ->
+			?LOG_ERROR("AAAAAAAAAAAAAAAAA ~p", [B#block.txs]),
 			case ar_weave:indep_hash(B) of
 				BH ->
 					SizeTaggedTXs = ar_block:generate_size_tagged_list_from_txs(B#block.txs),

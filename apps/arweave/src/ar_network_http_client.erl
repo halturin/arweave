@@ -189,7 +189,6 @@ get_tx(Peer, TXID) ->
 		{ok, {{<<"200">>, _}, _, Body, _, _}} ->
 			case catch ar_serialize:json_struct_to_tx(Body) of
 				TX when is_record(TX, tx) ->
-					?LOG_ERROR("JJJJ ~p", [TX]),
 					case ar_tx:verify_tx_id(TXID, TX) of
 						false ->
 							?LOG_WARNING([

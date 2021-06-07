@@ -843,6 +843,7 @@ test_basic() ->
 	ar_node:mine(),
 	BI = ar_test_node:wait_until_height(1),
 	B1 = ar_storage:read_block(hd(BI)),
+	ok = ar_events:subscribe(block),
 	start({B1, B1#block.poa, [], unclaimed, [], self(), [], BI}),
 	assert_mine_output(B1, B1#block.poa, []).
 
@@ -856,6 +857,7 @@ test_timestamp_refresh() ->
 	%% and find the block too fast, we retry until it succeeds.
 	[B0] = ar_weave:init([], ar_retarget:switch_to_linear_diff(18)),
 	B = B0,
+	already_subscribed = ar_events:subscribe(block),
 	Run = fun(_) ->
 		TXs = [],
 		StartTime = os:system_time(seconds),
@@ -875,57 +877,6 @@ test_timestamp_refresh() ->
 	end,
 	?assert(lists:any(Run, lists:seq(1, 20))).
 
-excludes_no_longer_valid_txs_test_() ->
-	ar_test_fork:test_on_fork(height_2_4, infinity, fun test_excludes_no_longer_valid_txs/0).
-
-test_excludes_no_longer_valid_txs() ->
-	%% Start mining with a high enough difficulty, so that the block
-	%% timestamp gets refreshed at least once. Since we might be unlucky
-	%% and find the block too fast, we retry until it succeeds.
-	Diff = ar_retarget:switch_to_linear_diff(18),
-	Key = {_, Pub} = ar_wallet:new(),
-	Address = ar_wallet:to_address(Pub),
-	Wallets = [{Address, ?AR(1000000000000), <<>>}],
-	[B] = ar_weave:init(Wallets, Diff),
-	{_Node, _} = ar_test_node:start(B),
-	BI = ar_test_node:wait_until_height(0),
-	Run = fun() ->
-		Now = os:system_time(seconds),
-		%% The transaction is invalid because its fee is based on a timestamp from the future.
-		InvalidTX = ar_test_node:sign_tx(Key, #{
-			last_tx => B#block.indep_hash,
-			reward => ar_tx:get_tx_fee(0, Diff, 10, Wallets, <<>>, Now + 10000)
-		}),
-		ValidTX = ar_test_node:sign_tx(Key, #{
-			last_tx => B#block.indep_hash,
-			reward => ar_tx:get_tx_fee(0, Diff, 10, Wallets, <<>>, Now)
-		}),
-		TXs = [ValidTX, InvalidTX],
-		start({B, #poa{}, TXs, unclaimed, [], self(), [{B#block.indep_hash, []}], BI}),
-		receive
-			{work_complete, _BH, MinedB, MinedTXs, _BDS, _POA} ->
-				{ValidTX, Now, MinedB#block.timestamp, MinedTXs}
-		after 120000 ->
-			error(timeout)
-		end
-	end,
-	{ValidTX, _, _, MinedTXs} = run_until(
-		fun({_, StartMineTimestamp, Timestamp, _}) ->
-			Timestamp > StartMineTimestamp + ?MINING_TIMESTAMP_REFRESH_INTERVAL
-		end,
-		Run
-	),
-	?assertEqual([ValidTX#tx.id], [TX#tx.id || TX <- MinedTXs]).
-
-run_until(Pred, Fun) ->
-	Run = Fun(),
-	case Pred(Run) of
-		true ->
-			Run;
-		false ->
-			run_until(Pred, Fun)
-	end.
-
 %% @doc Ensures ar_mine can be started and stopped.
 start_stop_test() ->
 	[B] = ar_weave:init(),
@@ -938,23 +889,9 @@ start_stop_test() ->
 	stop(PID),
 	assert_not_alive(PID, 3000).
 
-%% @doc Ensures a miner can be started and stopped.
-miner_start_stop_test() ->
-	S = #{
-		diff => trunc(math:pow(2, 1000)),
-		timestamp => os:system_time(seconds),
-		data_segment => <<>>,
-		height => 1
-	},
-	PID = spawn(?MODULE, mine, [S, self()]),
-	timer:sleep(500),
-	assert_alive(PID),
-	stop_miners([PID]),
-	assert_not_alive(PID, 3000).
-
 assert_mine_output(B, POA, TXs) ->
 	receive
-		{work_complete, BH, NewB, MinedTXs, BDS, POA} ->
+		{event, block, {mined, NewB, MinedTXs, BH}} ->
 			?assertEqual(BH, B#block.indep_hash),
 			?assertEqual(lists:sort(TXs), lists:sort(MinedTXs)),
 			BDS = ar_block:generate_block_data_segment(NewB),
@@ -979,7 +916,12 @@ assert_mine_output(B, POA, TXs) ->
 					)
 			end,
 			?assert(binary:decode_unsigned(NewB#block.hash) > NewB#block.diff),
-			{NewB#block.diff, NewB#block.timestamp}
+			{NewB#block.diff, NewB#block.timestamp};
+		{event, block, {new, _NewB, _FromPeerID}} ->
+			assert_mine_output(B, POA, TXs);
+
+		A ->
+			?LOG_ERROR("GOOOOT ~p", [A])
 	after 20000 ->
 		error(timeout)
 	end.

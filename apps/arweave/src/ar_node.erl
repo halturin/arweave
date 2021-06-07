@@ -70,7 +70,7 @@ get_block(Height) ->
 			end
 	end.
 %% @doc Get TX with the given TXID. It behave the same as get_block - tries
-%% to find it in mempool, on disk, in the arweave-network
+%% to find it locally (in mempool, on disk) and after all in the arweave-network
 %% @end
 get_tx(TXID) ->
 	get_txs([TXID]).

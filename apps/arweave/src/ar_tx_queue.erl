@@ -310,7 +310,7 @@ maybe_drop(Q, Size, MaxSize) ->
 maybe_drop(Q, {HeaderSize, DataSize} = Size, {MaxHeaderSize, MaxDataSize} = MaxSize, DroppedTXs) ->
 	case HeaderSize > MaxHeaderSize orelse DataSize > MaxDataSize of
 		true ->
-			{{_, {TX, {DroppedHeaderSize, DroppedDataSize}, _FromPeerID}}, NewQ} = gb_sets:take_smallest(Q),
+			{{_, {TX, {DroppedHeaderSize, DroppedDataSize}}}, NewQ} = gb_sets:take_smallest(Q),
 			maybe_drop(
 				NewQ,
 				{HeaderSize - DroppedHeaderSize, DataSize - DroppedDataSize},
@@ -323,7 +323,7 @@ maybe_drop(Q, {HeaderSize, DataSize} = Size, {MaxHeaderSize, MaxDataSize} = MaxS
 
 show_queue(Q) ->
 	gb_sets:fold(
-		fun({_, {TX, _, _}}, Acc) ->
+		fun({_, {TX, _}}, Acc) ->
 			[{ar_util:encode(TX#tx.id), TX#tx.reward, TX#tx.data_size} | Acc]
 		end,
 		[],

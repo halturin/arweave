@@ -26,11 +26,11 @@ single_regossip_test_1() ->
 	TX = ar_tx:new(),
 	?assertMatch(
 	   {ok, sent},
-		ar_network_http_client:post_tx({127, 0, 0, 1, 1984}, TX)
+		ar_test_node:post_tx_to_master(TX)
 	),
 	?assertMatch(
 		{ok, duplicate},
-		ar_network_http_client:post_tx({127, 0, 0, 1, 1984}, TX)
+		ar_test_node:post_tx_to_master(TX)
 	).
 
 %% @doc Unjoined nodes should not accept blocks
@@ -76,7 +76,7 @@ get_fun_msg_pair(get_info) ->
 get_fun_msg_pair(send_new_tx) ->
 	{ fun(_) ->
 			InvalidTX = (ar_tx:new())#tx { owner = <<"key">>, signature = <<"invalid">> },
-			case ar_network_http_client:post_tx({127, 0, 0, 1, 1984}, InvalidTX) of
+			case ar_test_node:post_tx_to_master(InvalidTX) of
 				{ok,too_many_requests} ->
 					too_many_requests;
 				_ -> ok
@@ -293,9 +293,9 @@ get_format_2_tx_test_failed() ->
 	EncodedTXID = binary_to_list(ar_util:encode(TXID)),
 	EncodedInvalidTXID = binary_to_list(ar_util:encode(InvalidTXID)),
 	EncodedEmptyTXID = binary_to_list(ar_util:encode(EmptyTXID)),
-	ar_network_http_client:post_tx({127, 0, 0, 1, 1984}, ValidTX),
-	ar_network_http_client:post_tx({127, 0, 0, 1, 1984}, InvalidDataRootTX),
-	ar_network_http_client:post_tx({127, 0, 0, 1, 1984}, EmptyTX),
+	ar_test_node:post_tx_to_master(ValidTX),
+	ar_test_node:post_tx_to_master(InvalidDataRootTX),
+	ar_test_node:post_tx_to_master(EmptyTX),
 	ar_test_node:wait_until_receives_txs([ValidTX, EmptyTX, InvalidDataRootTX]),
 	ar_node:mine(),
 	ar_test_node:wait_until_height(1),
@@ -350,7 +350,7 @@ get_format_1_tx_test_1() ->
 	{_Node, _} = ar_test_node:start(B0),
 	TX = #tx{ id = TXID } = ar_tx:new(<<"DATA">>),
 	EncodedTXID = binary_to_list(ar_util:encode(TXID)),
-	ar_network_http_client:post_tx({127, 0, 0, 1, 1984}, TX),
+	ar_test_node:post_tx_to_master(TX),
 	ar_test_node:wait_until_receives_txs([TX]),
 	ar_node:mine(),
 	ar_test_node:wait_until_height(1),
@@ -375,7 +375,7 @@ add_external_tx_with_tags_test_1() ->
 					{<<"TEST_TAG2">>, <<"TEST_VAL2">>}
 				]
 		},
-	ar_network_http_client:post_tx({127, 0, 0, 1, 1984}, TaggedTX),
+	ar_test_node:post_tx_to_master(TaggedTX),
 	ar_test_node:wait_until_receives_txs([TaggedTX]),
 	ar_node:mine(),
 	ar_test_node:wait_until_height(1),
@@ -390,7 +390,7 @@ add_external_tx_with_tags_test_1() ->
 find_external_tx_test_1() ->
 	[B0] = ar_weave:init(),
 	{_Node, _} = ar_test_node:start(B0),
-	ar_network_http_client:post_tx({127, 0, 0, 1, 1984}, TX = ar_tx:new(<<"DATA">>)),
+	ar_test_node:post_tx_to_master(TX = ar_tx:new(<<"DATA">>)),
 	ar_test_node:wait_until_receives_txs([TX]),
 	ar_node:mine(),
 	ar_test_node:wait_until_height(1),
@@ -415,7 +415,7 @@ fail_external_tx_test_1() ->
 	[B0] = ar_weave:init(),
 	{_Node, _} = ar_test_node:start(B0),
 	TX = ar_tx:new(<<"DATA">>),
-	ar_network_http_client:post_tx({127, 0, 0, 1, 1984}, TX),
+	ar_test_node:post_tx_to_master(TX),
 	ar_test_node:wait_until_receives_txs([TX]),
 	ar_node:mine(),
 	ar_test_node:wait_until_height(1),
@@ -560,7 +560,7 @@ add_tx_and_get_last_test_1() ->
 	TX = ar_tx:new(ar_wallet:to_address(Pub2), ?AR(1), ?AR(9000), <<>>),
 	SignedTX = ar_tx:sign_v1(TX, Priv1, Pub1),
 	ID = SignedTX#tx.id,
-	ar_network_http_client:post_tx({127, 0, 0, 1, 1984}, SignedTX),
+	ar_test_node:post_tx_to_master(SignedTX),
 	ar_test_node:wait_until_receives_txs([SignedTX]),
 	ar_node:mine(),
 	ar_test_node:wait_until_height(1),
@@ -576,7 +576,7 @@ add_tx_and_get_last_test_1() ->
 get_subfields_of_tx_test_1() ->
 	[B0] = ar_weave:init(),
 	{_Node, _} = ar_test_node:start(B0),
-	ar_network_http_client:post_tx({127, 0, 0, 1, 1984}, TX = ar_tx:new(<<"DATA">>)),
+	ar_test_node:post_tx_to_master(TX = ar_tx:new(<<"DATA">>)),
 	ar_test_node:wait_until_receives_txs([TX]),
 	ar_node:mine(),
 	ar_test_node:wait_until_height(1),
@@ -594,7 +594,7 @@ get_subfields_of_tx_test_1() ->
 get_pending_tx_test_1() ->
 	[B0] = ar_weave:init(),
 	{_Node, _} = ar_test_node:start(B0),
-	ar_network_http_client:post_tx({127, 0, 0, 1, 1984}, TX = ar_tx:new(<<"DATA1">>)),
+	ar_test_node:post_tx_to_master(TX = ar_tx:new(<<"DATA1">>)),
 	ar_test_node:wait_until_receives_txs([TX]),
 	%write a get_tx function like get_block
 	{ok, {{<<"202">>, _}, _, Body, _, _}} =
@@ -993,8 +993,7 @@ get_error_of_data_limit_test() ->
 	[B0] = ar_weave:init(),
 	{_Node, _} = ar_test_node:start(B0),
 	Limit = 1460,
-	ar_network_http_client:post_tx(
-		{127, 0, 0, 1, 1984},
+	ar_test_node:post_tx_to_master(
 		TX = ar_tx:new(<< <<0>> || _ <- lists:seq(1, Limit * 2) >>)
 	),
 	ar_test_node:wait_until_receives_txs([TX]),

@@ -351,10 +351,6 @@ handle_info({new_block, Peer, Height, NewB, BDS, ReceiveTimestamp}, State) ->
 	gen_server:cast(?MODULE, {process_new_block, Peer, Height, NewB, BDS, ReceiveTimestamp}),
 	{noreply, State};
 
-handle_info({work_complete, BaseBH, NewB, MinedTXs, BDS, POA}, State) ->
-	gen_server:cast(?MODULE, {work_complete, BaseBH, NewB, MinedTXs, BDS, POA}),
-	{noreply, State};
-
 handle_info({'DOWN', _Ref, process, PID, _Info}, State) ->
 	#{
 		blocks_missing_txs := Set,
@@ -940,7 +936,7 @@ start_mining(StateIn) ->
 				),
 				RewardAddr,
 				Tags,
-				ar_node_worker,
+				?MODULE,
 				BlockTXPairs,
 				BI
 			}),

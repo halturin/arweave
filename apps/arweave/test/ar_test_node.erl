@@ -11,7 +11,8 @@
 	wait_until_receives_txs/1, assert_wait_until_receives_txs/1,
 	assert_slave_wait_until_receives_txs/1,
 	post_tx_to_slave/1, post_tx_to_master/1, post_tx_to_master/2,
-	assert_post_tx_to_slave/1, assert_post_tx_to_master/1,
+	assert_post_tx_to_slave/1, assert_post_tx_to_slave/2,
+	assert_post_tx_to_master/1,
 	sign_tx/1, sign_tx/2, sign_tx/3,
 	sign_v1_tx/1, sign_v1_tx/2, sign_v1_tx/3,
 	get_tx_anchor/0, get_tx_anchor/1,
@@ -256,6 +257,8 @@ assert_slave_wait_until_receives_txs(TXs) ->
 	?assertEqual(ok, slave_call(?MODULE, wait_until_receives_txs, [TXs])).
 
 post_tx_to_slave(TX) ->
+	post_tx_to_slave(TX, true).
+post_tx_to_slave(TX, Wait) ->
 	SlavePort = slave_call(ar_meta_db, get, [port]),
 	SlaveIP = {127, 0, 0, 1, SlavePort},
 	Reply =
@@ -267,8 +270,10 @@ post_tx_to_slave(TX) ->
 			body => ar_serialize:jsonify(ar_serialize:tx_to_json_struct(TX))
 		}),
 	case Reply of
-		{ok, {{<<"200">>, _}, _, <<"OK">>, _, _}} ->
+		{ok, {{<<"200">>, _}, _, <<"OK">>, _, _}} when Wait == true ->
 			assert_slave_wait_until_receives_txs([TX]);
+		{ok, {{<<"200">>, _}, _, <<"OK">>, _, _}} ->
+			ok;
 		_ ->
 			?LOG_INFO(
 				"Failed to post transaction. Error DB entries: ~p~n",
@@ -280,6 +285,8 @@ post_tx_to_slave(TX) ->
 
 assert_post_tx_to_slave(TX) ->
 	{ok, {{<<"200">>, _}, _, <<"OK">>, _, _}} = post_tx_to_slave(TX).
+assert_post_tx_to_slave(TX, Wait) ->
+	{ok, {{<<"200">>, _}, _, <<"OK">>, _, _}} = post_tx_to_slave(TX, Wait).
 
 assert_post_tx_to_master(TX) ->
 	{ok, {{<<"200">>, _}, _, <<"OK">>, _, _}} = post_tx_to_master(TX).
