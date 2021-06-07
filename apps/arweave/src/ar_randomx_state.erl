@@ -271,7 +271,6 @@ get_block(BH, BI) ->
 		unavailable ->
 			unavailable;
 		B ->
-			?LOG_ERROR("AAAAAAAAAAAAAAAAA ~p", [B#block.txs]),
 			case ar_weave:indep_hash(B) of
 				BH ->
 					SizeTaggedTXs = ar_block:generate_size_tagged_list_from_txs(B#block.txs),

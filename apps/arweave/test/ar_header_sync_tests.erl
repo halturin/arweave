@@ -9,6 +9,7 @@
 -import(ar_test_node, [
 	start/1,
 	join_on_master/0,
+	slave_start/1,
 	connect_to_slave/0,
 	slave_call/3,
 	sign_tx/3, assert_post_tx_to_master/1,
@@ -23,6 +24,7 @@ test_syncs_headers() ->
 	Wallet = {_, Pub} = ar_wallet:new(),
 	[B0] = ar_weave:init([{ar_wallet:to_address(Pub), ?AR(200), <<>>}]),
 	{_Master, _} = start(B0),
+	slave_start(B0),
 	post_random_blocks(Wallet, 2 * ?MAX_TX_ANCHOR_DEPTH + 5, B0),
 	join_on_master(),
 	connect_to_slave(),
