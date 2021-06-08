@@ -9,7 +9,7 @@
 -import(ar_test_node, [get_tx_price/1, slave_mine/0, slave_call/3, connect_to_slave/0]).
 -import(ar_test_node, [post_tx_to_master/2, read_block_when_stored/1]).
 
-txs_broadcast_order_test_() ->
+txs_broadcast_order_test_AA() ->
 	{timeout, 60, fun test_txs_broadcast_order/0}.
 
 test_txs_broadcast_order() ->
@@ -74,7 +74,7 @@ test_txs_broadcast_order() ->
 	).
 
 drop_lowest_priority_txs_test_() ->
-	{timeout, 10, fun test_drop_lowest_priority_txs/0}.
+	{timeout, 15, fun test_drop_lowest_priority_txs/0}.
 
 test_drop_lowest_priority_txs() ->
 	setup(),
@@ -88,6 +88,7 @@ test_drop_lowest_priority_txs() ->
 		end,
 		LowerPriorityTXs
 	),
+	timer:sleep(1000),
 	Actual = [TXID || {[{_, TXID}, _, _]} <- http_get_queue()],
 	?assertEqual(5, length(Actual)),
 	[TX1, TX2, TX3, TX4, TX5] = Actual,
@@ -105,8 +106,11 @@ test_drop_lowest_priority_txs() ->
 		end,
 		HighestPriorityTXs
 	),
+	?LOG_ERROR("AAA4"),
+	timer:sleep(1000),
 	Actual2 = [TXID || {[{_, TXID}, _, _]} <- http_get_queue()],
 	?assertEqual(encode_txs(HighestPriorityTXs), Actual2),
+	?LOG_ERROR("AAA5"),
 	%% Set max data size. Submit some lower-priority format=2 txs. Expect
 	%% will drop those exceeding the new limit.
 	ar_tx_queue:set_max_header_size(9 * ?TX_SIZE_BASE + 1),

@@ -54,7 +54,7 @@
 		ar_weave, % no tests to run
 		ar_tx_blacklist_tests, % fails
 		ar_data_sync_tests, % ok
-		ar_header_sync_tests, % fails
+		ar_header_sync_tests, % ok
 		ar_poa_tests, % ok
 		ar_node_tests, % ok (but slave log has an exception message got_unexpected_wallet_list_chunk_deserialization_result)
 		ar_fork_recovery_tests, % ok

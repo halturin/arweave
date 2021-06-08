@@ -316,10 +316,11 @@ handle_info({event, tx, {mine, TX}}, State) ->
 	end;
 
 %% @doc Remove dropped transactions.
-handle_info({event, tx, {drop, DroppedTXs}}, State) ->
+handle_info({event, tx, {drop, DroppedTX, Reason}}, State) ->
+	?LOG_DEBUG("Drop TX ~p from pool with reason: ~p", [ar_util:encode(DroppedTX#tx.id), Reason]),
 	[{mempool_size, MempoolSize}] = ets:lookup(node_state, mempool_size),
 	[{tx_statuses, Map}] = ets:lookup(node_state, tx_statuses),
-	drop_txs(DroppedTXs, Map, MempoolSize),
+	drop_txs([DroppedTX], Map, MempoolSize),
 	{noreply, State};
 
 handle_info(wallets_ready, State) ->
@@ -824,7 +825,9 @@ apply_validated_block2(State, B, PrevBlocks, BI, BlockTXPairs) ->
 	drop_txs(BlockTXs, Map, MempoolSize),
 	[{tx_statuses, Map2}] = ets:lookup(node_state, tx_statuses),
 	gen_server:cast(self(), {filter_mempool, maps:iterator(Map2)}),
-	lists:foreach(fun(TX) -> ar_tx_queue:drop_tx(TX) end, BlockTXs),
+	lists:foreach(fun(TX) ->
+		ar_events:send(tx, {drop, TX, removed_from_mempool})
+	end, BlockTXs),
 	ets:insert(node_state, [
 		{block_index,			BI},
 		{current,				B#block.indep_hash},

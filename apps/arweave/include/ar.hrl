@@ -264,6 +264,12 @@
 %% Default TCP port.
 -define(DEFAULT_HTTP_IFACE_PORT, 1984).
 
+%% Number of transaction propagation processes to spawn.
+%% Each emitter picks a transaction from the queue and propagates it
+%% to the best peers, a configured number of peers at a time.
+%% Can be overriden by a command line argument.
+-define(NUM_EMITTER_PROCESSES, 2).
+
 %% The number of peers should receive the broadcasted TX.
 -define(NUM_PEERS_TX_BROADCAST, 2).
 
