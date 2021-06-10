@@ -11,8 +11,7 @@
 	set_pause/1,
 	set_num_peers_tx_broadcast/1,
 	show_queue/0,
-	utility/1,
-	drop_tx/1
+	utility/1
 ]).
 
 %% gen_server callbacks
@@ -82,9 +81,6 @@ set_num_peers_tx_broadcast(N) when N > 0->
 
 show_queue() ->
 	gen_server:call(?MODULE, show_queue).
-
-drop_tx(TX) ->
-	gen_server:cast(?MODULE, {drop_tx, TX}).
 
 %%%===================================================================
 %%% Generic server callbacks.
