@@ -1019,7 +1019,7 @@ process_spora_solution(BDS, B, MinedTXs, S) ->
 	SPoA = B#block.poa,
 	IndepHash = ar_weave:indep_hash(BDS, B#block.hash, B#block.nonce, SPoA),
 	B2 = B#block{ indep_hash = IndepHash },
-	Parent ! {work_complete, CurrentBH, B2, MinedTXs, BDS, SPoA},
+	ar_events:send(block, {mined, B2, MinedTXs, CurrentBH}),
 	log_spora_performance().
 
 prepare_randomx(Height) ->
@@ -1178,7 +1178,7 @@ test_start_stop() ->
 
 assert_mine_output(B, TXs) ->
 	receive
-		{work_complete, BH, NewB, MinedTXs, BDS, _POA} ->
+		{event, block, {mined, NewB, MinedTXs, BH}} ->
 			?assertEqual(BH, B#block.indep_hash),
 			?assertEqual(lists:sort(TXs), lists:sort(MinedTXs)),
 			BDS = ar_block:generate_block_data_segment(NewB),
@@ -1196,6 +1196,8 @@ assert_mine_output(B, TXs) ->
 			),
 			?assert(binary:decode_unsigned(NewB#block.hash) > NewB#block.diff),
 			{NewB#block.diff, NewB#block.timestamp}
+		{event, block, {new, _NewB, _FromPeerID}} ->
+			assert_mine_output(B, TXs);
 	after 20000 ->
 		error(timeout)
 	end.

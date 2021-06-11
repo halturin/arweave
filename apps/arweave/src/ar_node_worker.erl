@@ -40,6 +40,7 @@ start_link() ->
 
 init([]) ->
 	process_flag(trap_exit, true),
+	[ok,ok,ok] = ar_events:subscribe([tx, block]),
 	%% Initialize RandomX.
 	ar_randomx_state:start(),
 	ar_randomx_state:start_block_polling(),
@@ -82,11 +83,6 @@ init([]) ->
 		{_, false} ->
 			do_nothing
 	end,
-	Gossip = ar_gossip:init([
-		whereis(ar_bridge),
-		%% Attach webhook listeners to the internal gossip network.
-		ar_webhook:start(Config#config.webhooks)
-	]),
 	ar_bridge:add_local_peer(self()),
 	%% Add pending transactions from the persisted mempool to the propagation queue.
 	[{tx_statuses, Map}] = ets:lookup(node_state, tx_statuses),
@@ -95,7 +91,7 @@ init([]) ->
 				ok;
 			(TXID, waiting) ->
 				[{_, TX}] = ets:lookup(node_state, {tx, TXID}),
-				ar_bridge:add_tx(TX)
+				ar_events:send(tx, {new, TX, local})
 		end,
 		Map
 	),
@@ -223,6 +219,122 @@ handle_info({join, BI, Blocks}, State) ->
 	]),
 	{noreply, State};
 
+%% @doc Record the block in the block cache. Schedule an application of the
+%% earliest not validated block from the longest chain, if any.
+%% @end
+handle_info({event, block, {new, Block, _FromPeerID}}, State)
+		when length(Block#block.txs) > ?BLOCK_TX_COUNT_LIMIT ->
+	?LOG_WARNING([
+		{event, received_block_with_too_many_txs},
+		{block, ar_util:encode(Block#block.indep_hash)},
+		{txs, length(Block#block.txs)}
+	]),
+	{noreply, State};
+
+handle_info({event, block, {new, Block, FromPeerID}}, State) ->
+	case ar_block_cache:get(block_cache, Block#block.indep_hash) of
+		not_found ->
+			case ar_block_cache:get(block_cache, Block#block.previous_block) of
+				not_found ->
+					%% The cache should have been just pruned and this block is old.
+					{noreply, State};
+				_ when FromPeerID == poller ->
+					%% do not broadcast Block if we got it from the local poller (ar_poller)
+					ar_block_cache:add(block_cache, Block),
+					ar_ignore_registry:add(Block#block.indep_hash),
+					gen_server:cast(self(), apply_block),
+					{noreply, State};
+				_ ->
+					ar_block_cache:add(block_cache, Block),
+					ar_ignore_registry:add(Block#block.indep_hash),
+					gen_server:cast(self(), apply_block),
+					ar_bridge:broadcast_block(Block),
+					{noreply, State}
+			end;
+		_ ->
+			ar_ignore_registry:add(Block#block.indep_hash),
+			%% The block's already received from a different peer or
+			%% fetched by ar_poller.
+			{noreply, State}
+	end;
+
+handle_info({event, block, {mined, Block, TXs, CurrentBH}}, State) ->
+	case ets:lookup(node_state, block_index) of
+		[{block_index, [{CurrentBH, _, _} | _] = BI}] ->
+			[{block_txs_pairs, BlockTXPairs}] = ets:lookup(node_state, block_txs_pairs),
+			[{current, Current}] = ets:lookup(node_state, current),
+			SizeTaggedTXs = ar_block:generate_size_tagged_list_from_txs(TXs),
+			B = Block#block{ txs = TXs, size_tagged_txs = SizeTaggedTXs },
+			ar_watchdog:mined_block(B#block.indep_hash, B#block.height),
+			?LOG_INFO([
+				{event, mined_block},
+				{indep_hash, ar_util:encode(B#block.indep_hash)},
+				{txs, length(TXs)}
+			]),
+			PrevBlocks = [ar_block_cache:get(block_cache, Current)],
+			BI2 = [block_index_entry(B) | BI],
+			BlockTXPairs2 = [block_txs_pair(B) | BlockTXPairs],
+			ar_block_cache:add(block_cache, B),
+			ar_ignore_registry:add(B#block.indep_hash),
+			State2 = apply_validated_block(State, B, PrevBlocks, BI2, BlockTXPairs2),
+			% wont be received by itself, but we should let know all 'block' subscribers
+			ar_events:send(block, {new, B, miner}),
+			% broadcast it to all peers
+			ar_bridge:broadcast_block(Block),
+			{noreply, State2};
+		_ ->
+			?LOG_INFO([{event, ignore_mined_block}, {reason, accepted_foreign_block}]),
+			{noreply, State}
+	end;
+
+%% @doc Add the new waiting transaction to the server state.
+handle_info({event, tx, {new, TX, _FromPeerID}}, State) ->
+	[{mempool_size, MempoolSize}] = ets:lookup(node_state, mempool_size),
+	[{tx_statuses, Map}] = ets:lookup(node_state, tx_statuses),
+	case maps:is_key(TX#tx.id, Map) of
+		false ->
+			Map2 = maps:put(TX#tx.id, waiting, Map),
+			ets:insert(node_state, [
+				{{tx, TX#tx.id}, TX},
+				{tx_statuses, Map2},
+				{mempool_size, increase_mempool_size(MempoolSize, TX)}
+			]),
+			{noreply, State};
+		true ->
+			{noreply, State}
+	end;
+
+%% @doc Add the transaction to the mining pool, to be included in the mined block.
+handle_info({event, tx, {mine, TX}}, State) ->
+	[{mempool_size, MempoolSize}] = ets:lookup(node_state, mempool_size),
+	[{tx_statuses, Map}] = ets:lookup(node_state, tx_statuses),
+	case maps:get(TX#tx.id, Map, not_found) of
+		not_found ->
+			Map2 = maps:put(TX#tx.id, ready_for_mining, Map),
+			ets:insert(node_state, [
+				{{tx, TX#tx.id}, TX},
+				{tx_statuses, Map2},
+				{mempool_size, increase_mempool_size(MempoolSize, TX)}
+			]),
+			{noreply, State};
+		ready_for_mining ->
+			{noreply, State};
+		_ ->
+			Map2 = maps:put(TX#tx.id, ready_for_mining, Map),
+			ets:insert(node_state, [
+				{tx_statuses, Map2}
+			]),
+			{noreply, State}
+	end;
+
+%% @doc Remove dropped transactions.
+handle_info({event, tx, {drop, DroppedTX, Reason}}, State) ->
+	?LOG_DEBUG("Drop TX ~p from pool with reason: ~p", [ar_util:encode(DroppedTX#tx.id), Reason]),
+	[{mempool_size, MempoolSize}] = ets:lookup(node_state, mempool_size),
+	[{tx_statuses, Map}] = ets:lookup(node_state, tx_statuses),
+	drop_txs([DroppedTX], Map, MempoolSize),
+	{noreply, State};
+
 handle_info(wallets_ready, State) ->
 	[{block_index, BI}] = ets:lookup(node_state, block_index),
 	[{joined_blocks, Blocks}] = ets:lookup(node_state, joined_blocks),
@@ -260,14 +372,6 @@ handle_info(wallets_ready, State) ->
 		{scheduled_usd_to_ar_rate, ScheduledRate}
 	]),
 	{noreply, reset_miner(State)};
-
-handle_info({new_block, Peer, Height, NewB, BDS, ReceiveTimestamp}, State) ->
-	gen_server:cast(?MODULE, {process_new_block, Peer, Height, NewB, BDS, ReceiveTimestamp}),
-	{noreply, State};
-
-handle_info({work_complete, BaseBH, NewB, MinedTXs, BDS, POA}, State) ->
-	gen_server:cast(?MODULE, {work_complete, BaseBH, NewB, MinedTXs, BDS, POA}),
-	{noreply, State};
 
 handle_info({'DOWN', _Ref, process, PID, _Info}, State) ->
 	#{
@@ -332,19 +436,6 @@ handle_task({gossip_message, Msg}, #{ gossip := GS } = State) ->
 	{GS2, Message} = ar_gossip:recv(GS, Msg),
 	handle_gossip({GS2, Message}, State#{ gossip => GS2 });
 
-handle_task({add_tx, TX}, State) ->
-	handle_add_tx(State, TX, maps:get(gossip, State));
-
-handle_task({move_tx_to_mining_pool, TX}, State) ->
-	handle_move_tx_to_mining_pool(State, TX, maps:get(gossip, State));
-
-handle_task({process_new_block, Peer, Height, BShadow, BDS, ReceiveTimestamp}, State) ->
-	%% We have a new block. Distribute it to the gossip network. This is only
-	%% triggered in the polling mode.
-	GS = maps:get(gossip, State),
-	ar_gossip:send(GS, {new_block, Peer, Height, BShadow, BDS, ReceiveTimestamp}),
-	{noreply, State};
-
 handle_task(apply_block, State) ->
 	apply_block(State);
 
@@ -360,16 +451,6 @@ handle_task({cache_missing_txs, BH, TXs}, State) ->
 		{_B, _AnotherStatus} ->
 			%% The transactions should have been received and the block validated while
 			%% we were looking for previously missing transactions.
-			{noreply, State}
-	end;
-
-handle_task({work_complete, BaseBH, NewB, MinedTXs, BDS, POA}, State) ->
-	[{block_index, [{CurrentBH, _, _} | _]}] = ets:lookup(node_state, block_index),
-	case BaseBH of
-		CurrentBH ->
-			handle_block_from_miner(State, NewB, MinedTXs, BDS, POA);
-		_ ->
-			?LOG_INFO([{event, ignore_mined_block}, {reason, accepted_foreign_block}]),
 			{noreply, State}
 	end;
 
@@ -473,22 +554,6 @@ get_block_anchors_and_recent_txs_map(BlockTXPairs) ->
 		lists:sublist(BlockTXPairs, ?MAX_TX_ANCHOR_DEPTH)
 	).
 
-%% @doc Handle the gossip receive results.
-handle_gossip({_NewGS, {new_block, _Peer, _Height, BShadow, _BDS, _Timestamp}}, State) ->
-	handle_new_block(State, BShadow);
-
-handle_gossip({NewGS, {add_tx, TX}}, State) ->
-	handle_add_tx(State, TX, NewGS);
-
-handle_gossip({NewGS, {add_waiting_tx, TX}}, State) ->
-	handle_add_waiting_tx(State, TX, NewGS);
-
-handle_gossip({NewGS, {move_tx_to_mining_pool, TX}}, State) ->
-	handle_move_tx_to_mining_pool(State, TX, NewGS);
-
-handle_gossip({NewGS, {drop_waiting_txs, TXs}}, State) ->
-	handle_drop_waiting_txs(State, TXs, NewGS);
-
 handle_gossip({_NewGS, ignore}, State) ->
 	{noreply, State};
 
@@ -499,29 +564,6 @@ handle_gossip({_NewGS, UnknownMessage}, State) ->
 	]),
 	{noreply, State}.
 
-%% @doc Add the new transaction to the server state.
-handle_add_tx(State, TX, GS) ->
-	{NewGS, _} = ar_gossip:send(GS, {add_tx, TX}),
-	add_tx_to_mempool(TX, ready_for_mining),
-	{noreply, State#{ gossip => NewGS }}.
-
-add_tx_to_mempool(#tx{ id = TXID } = TX, Status) ->
-	[{mempool_size, MempoolSize}] = ets:lookup(node_state, mempool_size),
-	[{tx_statuses, Map}] = ets:lookup(node_state, tx_statuses),
-	MempoolSize2 =
-		case maps:is_key(TXID, Map) of
-			false ->
-				increase_mempool_size(MempoolSize, TX);
-			true ->
-				MempoolSize
-		end,
-	ets:insert(node_state, [
-		{{tx, TX#tx.id}, TX},
-		{tx_statuses, maps:put(TX#tx.id, Status, Map)},
-		{mempool_size, MempoolSize2}
-	]),
-	ok.
-
 increase_mempool_size({MempoolHeaderSize, MempoolDataSize}, TX) ->
 	{HeaderSize, DataSize} = tx_mempool_size(TX),
 	{MempoolHeaderSize + HeaderSize, MempoolDataSize + DataSize}.
@@ -531,44 +573,12 @@ tx_mempool_size(#tx{ format = 1, data = Data }) ->
 tx_mempool_size(#tx{ format = 2, data = Data }) ->
 	{?TX_SIZE_BASE, byte_size(Data)}.
 
-%% @doc Add the new waiting transaction to the server state.
-handle_add_waiting_tx(State, #tx{ id = TXID } = TX, GS) ->
-	[{mempool_size, MempoolSize}] = ets:lookup(node_state, mempool_size),
-	[{tx_statuses, Map}] = ets:lookup(node_state, tx_statuses),
-	{NewGS, _} = ar_gossip:send(GS, {add_waiting_tx, TX}),
-	case maps:is_key(TXID, Map) of
-		false ->
-			Map2 = maps:put(TX#tx.id, waiting, Map),
-			ets:insert(node_state, [
-				{{tx, TX#tx.id}, TX},
-				{tx_statuses, Map2},
-				{mempool_size, increase_mempool_size(MempoolSize, TX)}
-			]),
-			{noreply, State#{ gossip => NewGS }};
-		true ->
-			{noreply, State#{ gossip => NewGS }}
-	end.
-
-%% @doc Add the transaction to the mining pool, to be included in the mined block.
-handle_move_tx_to_mining_pool(State, TX, GS) ->
-	{NewGS, _} = ar_gossip:send(GS, {move_tx_to_mining_pool, TX}),
-	add_tx_to_mempool(TX, ready_for_mining),
-	{noreply, State#{ gossip => NewGS }}.
-
-handle_drop_waiting_txs(State, DroppedTXs, GS) ->
-	[{mempool_size, MempoolSize}] = ets:lookup(node_state, mempool_size),
-	[{tx_statuses, Map}] = ets:lookup(node_state, tx_statuses),
-	{NewGS, _} = ar_gossip:send(GS, {drop_waiting_txs, DroppedTXs}),
-	drop_txs(DroppedTXs, Map, MempoolSize),
-	{noreply, State#{ gossip => NewGS }}.
-
 drop_txs(DroppedTXs, TXs, MempoolSize) ->
 	{TXs2, DroppedTXMap} =
 		lists:foldl(
 			fun(TX, {Acc, DroppedAcc}) ->
 				case maps:take(TX#tx.id, Acc) of
 					{_Value, Map} ->
-						ar_tx_queue:drop_tx(TX),
 						{Map, maps:put(TX#tx.id, TX, DroppedAcc)};
 					error ->
 						{Acc, DroppedAcc}
@@ -608,37 +618,6 @@ take_mempool_chunk(Iterator, Size, Taken) ->
 				[] ->
 					take_mempool_chunk(NextIterator, Size, Taken)
 			end
-	end.
-
-%% @doc Record the block in the block cache. Schedule an application of the
-%% earliest not validated block from the longest chain, if any.
-%% @end
-handle_new_block(State, #block{ indep_hash = H, txs = TXs })
-		when length(TXs) > ?BLOCK_TX_COUNT_LIMIT ->
-	?LOG_WARNING([
-		{event, received_block_with_too_many_txs},
-		{block, ar_util:encode(H)},
-		{txs, length(TXs)}
-	]),
-	{noreply, State};
-handle_new_block(State, BShadow) ->
-	case ar_block_cache:get(block_cache, BShadow#block.indep_hash) of
-		not_found ->
-			case ar_block_cache:get(block_cache, BShadow#block.previous_block) of
-				not_found ->
-					%% The cache should have been just pruned and this block is old.
-					{noreply, State};
-				_ ->
-					ar_block_cache:add(block_cache, BShadow),
-					ar_ignore_registry:add(BShadow#block.indep_hash),
-					gen_server:cast(self(), apply_block),
-					{noreply, State}
-			end;
-		_ ->
-			ar_ignore_registry:add(BShadow#block.indep_hash),
-			%% The block's already received from a different peer or
-			%% fetched by ar_poller.
-			{noreply, State}
 	end.
 
 apply_block(#{ blocks_missing_txs := BlocksMissingTXs } = State) ->
@@ -947,7 +926,9 @@ return_orphaned_txs_to_mempool(H, H) ->
 	ok;
 return_orphaned_txs_to_mempool(H, BaseH) ->
 	#block{ txs = TXs, previous_block = PrevH } = ar_block_cache:get(block_cache, H),
-	lists:foreach(fun(TX) -> add_tx_to_mempool(TX, ready_for_mining) end, TXs),
+	lists:foreach(fun(TX) ->
+		ar_events:send(tx, {mine, TX})
+	end, TXs),
 	return_orphaned_txs_to_mempool(PrevH, BaseH).
 
 %% @doc Kill the old miner, optionally start a new miner, depending on the automine setting.
@@ -1013,30 +994,6 @@ calculate_mempool_size(TXs) ->
 		{0, 0},
 		TXs
 	).
-
-%% @doc Integrate the block found by us.
-handle_block_from_miner(State, BShadow, MinedTXs, BDS, _POA) ->
-	#{ gossip := GS } = State,
-	[{block_index, BI}] = ets:lookup(node_state, block_index),
-	[{block_txs_pairs, BlockTXPairs}] = ets:lookup(node_state, block_txs_pairs),
-	[{current, Current}] = ets:lookup(node_state, current),
-	SizeTaggedTXs = ar_block:generate_size_tagged_list_from_txs(MinedTXs),
-	B = BShadow#block{ txs = MinedTXs, size_tagged_txs = SizeTaggedTXs },
-	ar_watchdog:mined_block(B#block.indep_hash, B#block.height),
-	?LOG_INFO([
-		{event, mined_block},
-		{indep_hash, ar_util:encode(B#block.indep_hash)},
-		{txs, length(MinedTXs)}
-	]),
-	GossipMessage = {new_block, self(), B#block.height, B, BDS, erlang:timestamp()},
-	{NewGS, _} = ar_gossip:send(GS, GossipMessage),
-	PrevBlocks = [ar_block_cache:get(block_cache, Current)],
-	BI2 = [block_index_entry(B) | BI],
-	BlockTXPairs2 = [block_txs_pair(B) | BlockTXPairs],
-	ar_block_cache:add(block_cache, B),
-	ar_ignore_registry:add(B#block.indep_hash),
-	State2 = apply_validated_block(State, B, PrevBlocks, BI2, BlockTXPairs2),
-	{noreply, State2#{ gossip => NewGS }}.
 
 %% @doc Assign a priority to the task. 0 corresponds to the highest priority.
 priority({gossip_message, #gs_msg{ data = {new_block, _, Height, _, _, _} }}) ->

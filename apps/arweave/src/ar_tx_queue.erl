@@ -294,11 +294,12 @@ handle_cast({emitted_tx_to_peer, {Reply, TX}}, State = #state{ emit_map = EmitMa
 	end;
 
 handle_cast({emitter_finished, TX}, State) ->
+	% send this TX to the mining pool with some delay depending on the TX size
 	timer:apply_after(
 		ar_node_utils:calculate_delay(tx_propagated_size(TX)),
-		ar_bridge,
-		move_tx_to_mining_pool,
-		[TX]
+		ar_events,
+		send,
+		[tx, {mine, TX}]
 	),
 	timer:apply_after(?EMITTER_INTER_WAIT, gen_server, cast, [?MODULE, emitter_go]),
 	{noreply, State};

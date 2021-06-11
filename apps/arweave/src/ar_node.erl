@@ -281,7 +281,7 @@ mine() ->
 %% the next block.
 %% @end
 add_tx(TX)->
-	gen_server:cast(ar_node_worker, {add_tx, TX}).
+	ar_events:send(tx, {new, TX, <<"">>}).
 
 %% @doc Request to add a list of peers to the node server loop.
 add_peers(Peer) when not is_list(Peer) ->

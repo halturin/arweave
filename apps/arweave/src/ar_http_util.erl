@@ -30,6 +30,10 @@ arweave_peer(Req) ->
 		end,
 	{IpV4_1, IpV4_2, IpV4_3, IpV4_4, ArweavePeerPort}.
 
+arweave_peer_id(Req) ->
+	Peer_IP_Port = arweave_peer(Req),
+	list_to_binary(lists:flatten(io_lib:format("~p",[Peer_IP_Port]))).
+
 %%%===================================================================
 %%% Private functions.
 %%%===================================================================
