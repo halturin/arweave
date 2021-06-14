@@ -113,7 +113,9 @@
 		arql => ?MAX_PARALLEL_ARQL_REQUESTS,
 		gateway_arql => ?MAX_PARALLEL_GATEWAY_ARQL_REQUESTS,
 		get_sync_record => ?MAX_PARALLEL_GET_SYNC_RECORD_REQUESTS
-	}
+	},
+	wildfire = {#{}, #{}},
+	debug = false
 }).
 
 -endif.

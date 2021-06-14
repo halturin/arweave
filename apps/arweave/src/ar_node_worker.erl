@@ -40,7 +40,7 @@ start_link() ->
 
 init([]) ->
 	process_flag(trap_exit, true),
-	[ok,ok,ok] = ar_events:subscribe([tx, block]),
+	[ok,ok] = ar_events:subscribe([tx, block]),
 	%% Initialize RandomX.
 	ar_randomx_state:start(),
 	ar_randomx_state:start_block_polling(),
@@ -109,6 +109,7 @@ init([]) ->
 		{is_joined,						false},
 		{hash_list_2_0_for_1_0_blocks,	read_hash_list_2_0_for_1_0_blocks()}
 	]),
+	Gossip = ar_gossip:init(),
 	%% Start the HTTP server.
 	ok = ar_http_iface_server:start(),
 	{ok, #{
@@ -579,6 +580,7 @@ drop_txs(DroppedTXs, TXs, MempoolSize) ->
 			fun(TX, {Acc, DroppedAcc}) ->
 				case maps:take(TX#tx.id, Acc) of
 					{_Value, Map} ->
+						ar_events:send(tx, {drop, TX, removed_from_mempool}),
 						{Map, maps:put(TX#tx.id, TX, DroppedAcc)};
 					error ->
 						{Acc, DroppedAcc}
@@ -857,7 +859,6 @@ apply_validated_block2(State, B, PrevBlocks, BI, BlockTXPairs) ->
 	drop_txs(BlockTXs, Map, MempoolSize),
 	[{tx_statuses, Map2}] = ets:lookup(node_state, tx_statuses),
 	gen_server:cast(self(), {filter_mempool, maps:iterator(Map2)}),
-	lists:foreach(fun(TX) -> ar_tx_queue:drop_tx(TX) end, BlockTXs),
 	{BlockAnchors, RecentTXMap} = get_block_anchors_and_recent_txs_map(BlockTXPairs),
 	{Rate, ScheduledRate} =
 		case B#block.height >= ar_fork:height_2_5() of

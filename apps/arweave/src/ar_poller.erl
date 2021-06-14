@@ -146,7 +146,7 @@ submit_fetched_blocks([B | Blocks], Peer, ReceiveTimestamp) ->
 		{height, B#block.height}
 	]),
 	% won't be broadcasted
-	ar_events:send(block, {new, BShadow, poller}),
+	ar_events:send(block, {new, B, poller}),
 	submit_fetched_blocks(Blocks, Peer, ReceiveTimestamp);
 submit_fetched_blocks([], _Peer, _ReceiveTimestamp) ->
 	ok.

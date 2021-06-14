@@ -1195,9 +1195,9 @@ assert_mine_output(B, TXs) ->
 				NewB#block.hash
 			),
 			?assert(binary:decode_unsigned(NewB#block.hash) > NewB#block.diff),
-			{NewB#block.diff, NewB#block.timestamp}
+			{NewB#block.diff, NewB#block.timestamp};
 		{event, block, {new, _NewB, _FromPeerID}} ->
-			assert_mine_output(B, TXs);
+			assert_mine_output(B, TXs)
 	after 20000 ->
 		error(timeout)
 	end.

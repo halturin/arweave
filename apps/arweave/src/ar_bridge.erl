@@ -14,8 +14,7 @@
 	start_link/0,
 	add_remote_peer/1, add_local_peer/1,
 	get_remote_peers/0, get_remote_peers/1, set_remote_peers/1,
-	broadcast/2,
-	drop_waiting_txs/1
+	broadcast_block/1
 ]).
 
 -export([
@@ -158,7 +157,7 @@ handle_cast({set_peers, Peers}, State) ->
 
 handle_cast({broadcast, block, Block}, State) ->
 	send_block_to_external(
-		S#state.external_peers,
+		State#state.external_peers,
 		Block
 	),
 	{noreply, State};

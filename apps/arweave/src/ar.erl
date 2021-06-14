@@ -226,6 +226,9 @@ show_help() ->
 			{"randomx_bulk_hashing_iterations",
 				"The number of hashes RandomX generates before reporting the result back"
 				" to the Arweave miner. The faster CPU hashes, the higher this value should be."
+			},
+			{"debug",
+				"Enable extended logging."
 			}
 		]
 	),
@@ -353,6 +356,8 @@ parse_cli_args(["max_disk_pool_data_root_buffer_mb", Num | Rest], C) ->
 	parse_cli_args(Rest, C#config { max_disk_pool_data_root_buffer_mb = list_to_integer(Num) });
 parse_cli_args(["randomx_bulk_hashing_iterations", Num | Rest], C) ->
 	parse_cli_args(Rest, C#config { randomx_bulk_hashing_iterations = list_to_integer(Num) });
+parse_cli_args(["debug" | Rest], C) ->
+	parse_cli_args(Rest, C#config { debug = true });
 parse_cli_args([Arg|_Rest], _O) ->
 	io:format("~nUnknown argument: ~s.~n", [Arg]),
 	show_help().

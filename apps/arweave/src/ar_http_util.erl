@@ -1,6 +1,6 @@
 -module(ar_http_util).
 
--export([get_tx_content_type/1, arweave_peer/1]).
+-export([get_tx_content_type/1, arweave_peer/1, arweave_peer_id/1]).
 
 -include_lib("arweave/include/ar.hrl").
 
