@@ -83,7 +83,6 @@ init([]) ->
 		{_, false} ->
 			do_nothing
 	end,
-	ar_bridge:add_local_peer(self()),
 	%% Add pending transactions from the persisted mempool to the propagation queue.
 	[{tx_statuses, Map}] = ets:lookup(node_state, tx_statuses),
 	maps:map(
@@ -109,14 +108,12 @@ init([]) ->
 		{is_joined,						false},
 		{hash_list_2_0_for_1_0_blocks,	read_hash_list_2_0_for_1_0_blocks()}
 	]),
-	Gossip = ar_gossip:init(),
 	%% Start the HTTP server.
 	ok = ar_http_iface_server:start(),
 	{ok, #{
 		miner => undefined,
 		automine => false,
 		tags => [],
-		gossip => Gossip,
 		reward_addr => Config#config.mining_addr,
 		blocks_missing_txs => sets:new(),
 		missing_txs_lookup_processes => #{},
@@ -206,10 +203,6 @@ handle_cast(Message, #{ task_queue := TaskQueue } = State) ->
 		false ->
 			{noreply, State#{ task_queue => gb_sets:insert(Task, TaskQueue) }}
 	end.
-
-handle_info(Info, State) when is_record(Info, gs_msg) ->
-	gen_server:cast(?MODULE, {gossip_message, Info}),
-	{noreply, State};
 
 handle_info({join, BI, Blocks}, State) ->
 	{ok, Config} = application:get_env(arweave, config),
@@ -433,9 +426,6 @@ record_mempool_size_metrics({HeaderSize, DataSize}) ->
 	prometheus_gauge:set(mempool_header_size_bytes, HeaderSize),
 	prometheus_gauge:set(mempool_data_size_bytes, DataSize).
 
-handle_task({gossip_message, Msg}, #{ gossip := GS } = State) ->
-	{GS2, Message} = ar_gossip:recv(GS, Msg),
-	handle_gossip({GS2, Message}, State#{ gossip => GS2 });
 
 handle_task(apply_block, State) ->
 	apply_block(State);
@@ -468,12 +458,6 @@ handle_task(mine, #{ io_threads := IOThreads } = State) ->
 handle_task(automine, State) ->
 	{noreply, start_mining(State#{ automine => true })};
 
-handle_task({add_peers, Peers}, #{ gossip := GS } = State) ->
-	NewGS = ar_gossip:add_peers(GS, Peers),
-	{noreply, State#{ gossip => NewGS }};
-
-handle_task({set_loss_probability, Prob}, #{ gossip := GS } = State) ->
-	{noreply, State#{ gossip => ar_gossip:set_loss_probability(GS, Prob) }};
 
 handle_task({filter_mempool, Iterator}, State) ->
 	[{tx_statuses, Map}] = ets:lookup(node_state, tx_statuses),
@@ -554,16 +538,6 @@ get_block_anchors_and_recent_txs_map(BlockTXPairs) ->
 		{[], #{}},
 		lists:sublist(BlockTXPairs, ?MAX_TX_ANCHOR_DEPTH)
 	).
-
-handle_gossip({_NewGS, ignore}, State) ->
-	{noreply, State};
-
-handle_gossip({_NewGS, UnknownMessage}, State) ->
-	?LOG_INFO([
-		{event, ar_node_worker_received_unknown_gossip_message},
-		{message, UnknownMessage}
-	]),
-	{noreply, State}.
 
 increase_mempool_size({MempoolHeaderSize, MempoolDataSize}, TX) ->
 	{HeaderSize, DataSize} = tx_mempool_size(TX),
@@ -996,9 +970,6 @@ calculate_mempool_size(TXs) ->
 		TXs
 	).
 
-%% @doc Assign a priority to the task. 0 corresponds to the highest priority.
-priority({gossip_message, #gs_msg{ data = {new_block, _, Height, _, _, _} }}) ->
-	{0, Height};
 priority(apply_block) ->
 	{1, 1};
 priority({work_complete, _, _, _, _, _}) ->

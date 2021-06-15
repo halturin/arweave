@@ -3,9 +3,6 @@
 %% with this file, You can obtain one at
 %% https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html
 
-%%% @doc Represents a bridge node in the internal gossip network
-%%% to the external message passing interfaces.
-%%% @end
 -module(ar_events).
 
 -behaviour(gen_server).

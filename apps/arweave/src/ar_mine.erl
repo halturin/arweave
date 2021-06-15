@@ -1126,6 +1126,7 @@ test_basic() ->
 	BI = ar_test_node:wait_until_height(1),
 	B1 = ar_test_node:read_block_when_stored(hd(BI)),
 	Threads = maps:get(io_threads, sys:get_state(ar_node_worker)),
+	ar_events:subscribe(block),
 	start({B1, [], unclaimed, [], self(), [], #{}, BI, Threads}),
 	assert_mine_output(B1, []).
 
@@ -1140,10 +1141,12 @@ test_timestamp_refresh() ->
 	[B0] = ar_weave:init([], ar_retarget:switch_to_linear_diff(20)),
 	ar_test_node:start(B0),
 	B = B0,
+	ar_events:subscribe(block),
 	Threads = maps:get(io_threads, sys:get_state(ar_node_worker)),
 	Run = fun(_) ->
 		TXs = [],
 		StartTime = os:system_time(seconds),
+		ar_events:subscribe(block),
 		start({
 			B,
 			TXs,
