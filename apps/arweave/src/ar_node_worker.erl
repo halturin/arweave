@@ -662,6 +662,7 @@ apply_block(State, BShadow, [PrevB | _] = PrevBlocks) ->
 							]),
 							BH = B#block.indep_hash,
 							ar_block_cache:remove(block_cache, BH),
+							gen_server:cast(self(), apply_block),
 							{noreply, State};
 						valid ->
 							State2 =
@@ -902,7 +903,8 @@ return_orphaned_txs_to_mempool(H, H) ->
 return_orphaned_txs_to_mempool(H, BaseH) ->
 	#block{ txs = TXs, previous_block = PrevH } = ar_block_cache:get(block_cache, H),
 	lists:foreach(fun(TX) ->
-		ar_events:send(tx, {mine, TX})
+		% events aren't delivering to the sender, so spawn the process
+		spawn(fun() -> ar_events:send(tx, {mine, TX}) end)
 	end, TXs),
 	return_orphaned_txs_to_mempool(PrevH, BaseH).
 
