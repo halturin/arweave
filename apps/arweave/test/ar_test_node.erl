@@ -638,4 +638,4 @@ post_chunk2(Peer, Proof) ->
 	}).
 
 add_peer(Port) ->
-	ar_bridge:add_remote_peer({127,0,0,1,Port}).
+	ar_bridge:add_remote_peer({127, 0, 0, 1, Port}).

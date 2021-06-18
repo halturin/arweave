@@ -254,7 +254,7 @@ handle_cast({emitted_tx_to_peer, {Reply, TX}}, State = #state{ emit_map = EmitMa
 	end;
 
 handle_cast({emitter_finished, TX}, State) ->
-	% send this TX to the mining pool with some delay depending on the TX size
+	%% Send this TX to the mining pool with some delay depending on the TX size.
 	timer:apply_after(
 		ar_node_utils:calculate_delay(tx_propagated_size(TX)),
 		ar_events,
@@ -355,8 +355,8 @@ handle_info({event, tx, {drop, TX, Reason}}, State) ->
 			{noreply, State}
 	end;
 
-handle_info({event, tx, Event}, State) ->
-	% ignore the rest of tx events (mine, ...)
+handle_info({event, tx, _Event}, State) ->
+	%% Ignore the rest of tx events (mine, ...).
 	{noreply, State};
 
 handle_info(Message, State) ->

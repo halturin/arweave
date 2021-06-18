@@ -36,7 +36,8 @@
 %%%===================================================================
 %%% API
 %%%===================================================================
-event_to_process(Event) when is_atom(Event) -> list_to_atom("ar_event_"++atom_to_list(Event)).
+
+event_to_process(Event) when is_atom(Event) -> list_to_atom("ar_event_" ++ atom_to_list(Event)).
 
 subscribe(Event) when is_atom(Event) ->
 	Process = event_to_process(Event),
@@ -52,7 +53,6 @@ cancel(Event) ->
 
 send(Event, Value) ->
 	Process = event_to_process(Event),
-	% Check whether this process alive
 	case whereis(Process) of
 		undefined ->
 			error;
@@ -137,8 +137,9 @@ handle_call(Request, _From, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_cast({send, From, Value}, State) ->
-	% send to the subscribers except themself
-	[Pid ! {event, State#state.name, Value} || Pid <- maps:keys(State#state.subscribers), Pid /= From],
+	%% Send to the subscribers except self.
+	[Pid ! {event, State#state.name, Value}
+		|| Pid <- maps:keys(State#state.subscribers), Pid /= From],
 	{noreply, State};
 handle_cast(Msg, State) ->
 	?LOG_ERROR([{event, unhandled_cast}, {module, ?MODULE}, {message, Msg}]),

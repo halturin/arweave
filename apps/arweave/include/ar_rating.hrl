@@ -12,32 +12,34 @@
 	time = 0 :: non_neg_integer() % response time or request timestamp
 }).
 
-% This record is using as a data structure for the 'rating' database (RocksDB)
+%% @doc The record contains parameters used to compute the Wildfire score
+%% for a peer, including the Wildfire score itself.
 -record(rating, {
-	% rating value
+	%% The Wildfire score.
 	r = 0,
-	% Keep the date of starting this peering.
+	%% The timestamp for when we started peering.
 	since = os:system_time(second),
-	% rate group keeps the accumulated value of rated action which
-	% is defined in 'rates' map.
-	% Key:
-	%   is the tuple with two values
-	%   {Act, Positive}
-	% 	Act - is the first value of a key tuple in the rates map
-	% 	Positive - true or false.
-	% Value:
-	%   tuple with two values
-	%   {N, History}
-	%   N - accumulated value
-	%   History - list of timestamps
-	% example: {response, false} => {-123, [1613147757, 1613147333]}
+	%% rate group keeps the accumulated value of rated action which
+	%% is defined in 'rates' map.
+	%% Key:
+	%%   is the tuple with two values
+	%%   {Act, Positive}
+	%% 	Act - is the first value of a key tuple in the rates map
+	%% 	Positive - true or false.
+	%% Value:
+	%%   tuple with two values
+	%%   {N, History}
+	%%   N - accumulated value
+	%%   History - list of timestamps
+	%% example: {response, false} => {-123, [1613147757, 1613147333]}
 	rate_group = #{},
-	% when it was last time updated
+	%% The timestamp of the last record update.
 	last_update = os:system_time(second),
-	% banned until time
+	%% The timestamp for when to unban the banned peer.
 	ban = 0,
-	% hostname (or last used ip address) and port
+	%% The IP address or the hostname the peer uses (a part of the identifier).
 	host,
+	%% The TCP port the peer uses (a part of the identifier).
 	port = 1984
 }).
 

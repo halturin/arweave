@@ -225,5 +225,3 @@ test_persisted_mempool() ->
 	[{H, _, _} | _] = assert_slave_wait_until_height(1),
 	B = ar_test_node:read_block_when_stored(H),
 	?assertEqual([SignedTX#tx.id], B#block.txs).
-
-

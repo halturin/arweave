@@ -59,7 +59,7 @@
 		ar_data_sync_tests,
 		ar_header_sync_tests,
 		ar_node_tests,
-%		ar_fork_recovery_tests,
+		ar_fork_recovery_tests,
 		ar_mine,
 		ar_tx_replay_pool_tests,
 		ar_tx_queue,

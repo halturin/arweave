@@ -40,7 +40,7 @@ start_link() ->
 
 init([]) ->
 	process_flag(trap_exit, true),
-	[ok,ok] = ar_events:subscribe([tx, block]),
+	[ok, ok] = ar_events:subscribe([tx, block]),
 	%% Initialize RandomX.
 	ar_randomx_state:start(),
 	ar_randomx_state:start_block_polling(),
@@ -213,9 +213,6 @@ handle_info({join, BI, Blocks}, State) ->
 	]),
 	{noreply, State};
 
-%% @doc Record the block in the block cache. Schedule an application of the
-%% earliest not validated block from the longest chain, if any.
-%% @end
 handle_info({event, block, {new, Block, _FromPeerID}}, State)
 		when length(Block#block.txs) > ?BLOCK_TX_COUNT_LIMIT ->
 	?LOG_WARNING([
@@ -226,6 +223,8 @@ handle_info({event, block, {new, Block, _FromPeerID}}, State)
 	{noreply, State};
 
 handle_info({event, block, {new, Block, FromPeerID}}, State) ->
+	%% Record the block in the block cache. Schedule an application of the
+	%% earliest not validated block from the longest chain, if any.
 	case ar_block_cache:get(block_cache, Block#block.indep_hash) of
 		not_found ->
 			case ar_block_cache:get(block_cache, Block#block.previous_block) of
@@ -271,9 +270,9 @@ handle_info({event, block, {mined, Block, TXs, CurrentBH}}, State) ->
 			ar_block_cache:add(block_cache, B),
 			ar_ignore_registry:add(B#block.indep_hash),
 			State2 = apply_validated_block(State, B, PrevBlocks, BI2, BlockTXPairs2),
-			% wont be received by itself, but we should let know all 'block' subscribers
-			ar_events:send(block, {new, B, miner}),
-			% broadcast it to all peers
+			%% Won't be received by itself, but we should let know all 'block' subscribers.
+			ar_events:send(block, {new, Block, miner}),
+			%% Broadcast it to peers.
 			ar_bridge:broadcast_block(Block),
 			{noreply, State2};
 		_ ->
@@ -281,7 +280,7 @@ handle_info({event, block, {mined, Block, TXs, CurrentBH}}, State) ->
 			{noreply, State}
 	end;
 
-%% @doc Add the new waiting transaction to the server state.
+%% Add the new waiting transaction to the server state.
 handle_info({event, tx, {new, TX, _FromPeerID}}, State) ->
 	[{mempool_size, MempoolSize}] = ets:lookup(node_state, mempool_size),
 	[{tx_statuses, Map}] = ets:lookup(node_state, tx_statuses),
@@ -298,12 +297,12 @@ handle_info({event, tx, {new, TX, _FromPeerID}}, State) ->
 			{noreply, State}
 	end;
 
-%% @doc Add the transaction to the mining pool, to be included in the mined block.
+%% Add the transaction to the mining pool, to be included in the mined block.
 handle_info({event, tx, {mine, TX}}, State) ->
 	add_tx_to_mempool(TX, ready_for_mining),
 	{noreply, State};
 
-%% @doc Remove dropped transactions.
+%% Remove dropped transactions.
 handle_info({event, tx, {drop, DroppedTX, Reason}}, State) ->
 	?LOG_DEBUG("Drop TX ~p from pool with reason: ~p", [ar_util:encode(DroppedTX#tx.id), Reason]),
 	[{mempool_size, MempoolSize}] = ets:lookup(node_state, mempool_size),
