@@ -13,8 +13,7 @@
 -export([
 	start_link/0,
 	add_remote_peer/1,
-	get_remote_peers/0, get_remote_peers/1, set_remote_peers/1,
-	broadcast_block/1
+	get_remote_peers/0, get_remote_peers/1, set_remote_peers/1
 ]).
 
 -export([
@@ -59,9 +58,6 @@ get_remote_peers() ->
 set_remote_peers(Peers) ->
 	gen_server:cast(?MODULE, {set_peers, Peers}).
 
-broadcast_block(Block) ->
-	gen_server:cast(?MODULE, {broadcast, block, Block}).
-
 %%--------------------------------------------------------------------
 %% @doc
 %% Starts the server
@@ -91,6 +87,7 @@ init([]) ->
 	{ok, Config} = application:get_env(arweave, config),
 	%% Start asking peers about their peers.
 	erlang:send_after(0, self(), get_more_peers),
+	ar_events:subscribe(block),
 	State = #state {
 		external_peers = Config#config.peers
 	},
@@ -143,12 +140,6 @@ handle_cast({set_peers, Peers}, State) ->
 	update_state_metrics(Peers),
 	{noreply, State#state{ external_peers = Peers }};
 
-handle_cast({broadcast, block, Block}, State) ->
-	spawn(fun() ->
-		send_block_to_external_parallel(State#state.external_peers, Block)
-	end),
-	{noreply, State};
-
 handle_cast(Msg, State) ->
 	?LOG_ERROR([{event, unhandled_cast}, {module, ?MODULE}, {message, Msg}]),
 	{noreply, State}.
@@ -185,6 +176,25 @@ handle_info({update_peers, remote, Peers}, State) ->
 	State2 = State#state{ external_peers = Peers, updater = undefined },
 	{noreply, State2};
 
+handle_info({event, block, {new, Block, poller}}, State) ->
+	%% Do nothing if we got this block from the poller process
+	{noreply, State};
+
+handle_info({event, block, {new, Block, FromPeerID}}, State) ->
+	case ar_block_cache:get(block_cache, Block#block.previous_block) of
+		not_found ->
+			%% The cache should have been just pruned and this block is old.
+			{noreply, State};
+		_ ->
+			spawn(fun() ->
+				send_block_to_external_parallel(State#state.external_peers, Block)
+			end),
+			{noreply, State}
+	end;
+
+handle_info({event, block, {mined, _Block, _TXs, _CurrentBH}}, State) ->
+	%% This event is handling by node worker. Ignore it.
+	{noreply, State};
 handle_info(Info, State) ->
 	?LOG_ERROR([{event, unhandled_info}, {module, ?MODULE}, {info, Info}]),
 	{noreply, State}.

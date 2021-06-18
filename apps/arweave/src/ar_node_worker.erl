@@ -231,17 +231,10 @@ handle_info({event, block, {new, Block, FromPeerID}}, State) ->
 				not_found ->
 					%% The cache should have been just pruned and this block is old.
 					{noreply, State};
-				_ when FromPeerID == poller ->
-					%% do not broadcast Block if we got it from the local poller (ar_poller)
-					ar_block_cache:add(block_cache, Block),
-					ar_ignore_registry:add(Block#block.indep_hash),
-					gen_server:cast(self(), apply_block),
-					{noreply, State};
 				_ ->
 					ar_block_cache:add(block_cache, Block),
 					ar_ignore_registry:add(Block#block.indep_hash),
 					gen_server:cast(self(), apply_block),
-					ar_bridge:broadcast_block(Block),
 					{noreply, State}
 			end;
 		_ ->
@@ -272,8 +265,6 @@ handle_info({event, block, {mined, Block, TXs, CurrentBH}}, State) ->
 			State2 = apply_validated_block(State, B, PrevBlocks, BI2, BlockTXPairs2),
 			%% Won't be received by itself, but we should let know all 'block' subscribers.
 			ar_events:send(block, {new, Block, miner}),
-			%% Broadcast it to peers.
-			ar_bridge:broadcast_block(Block),
 			{noreply, State2};
 		_ ->
 			?LOG_INFO([{event, ignore_mined_block}, {reason, accepted_foreign_block}]),
