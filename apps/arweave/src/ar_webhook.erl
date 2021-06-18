@@ -32,8 +32,7 @@
 %% Internal state definition.
 -record(state, {
 	url,
-	headers,
-	retry = []
+	headers
 }).
 
 %%%===================================================================
@@ -132,17 +131,8 @@ handle_info({event, block, {Event, Block, _FromPeerID}}, State) ->
 	% Event can be 'new' or 'mined'
 	URL = State#state.url,
 	Headers = State#state.headers,
-	case call_webhook(URL, Headers, Block, Event)  of
-		ok ->
-			{noreply, State};
-		_ when length(State#state.retry) > 0->
-			Retry = State#state.retry ++ [{Block, Event, 1, os:system_time(second)}],
-			{noreply, State#state{retry = Retry}};
-		_ ->
-			?MODULE ! retry,
-			Retry = State#state.retry ++ [{Block, Event, 1, os:system_time(second)}],
-			{noreply, State#state{retry = Retry}}
-	end;
+	call_webhook(URL, Headers, Block, Event),
+	{noreply, State};
 
 handle_info({event, tx, {drop, _DroppedTXs}}, State) ->
 	{noreply, State};
@@ -155,51 +145,8 @@ handle_info({event, tx, {Event, TX, _FromPeerID}}, State) ->
 	% Event can be 'new' or 'mine'
 	URL = State#state.url,
 	Headers = State#state.headers,
-	case call_webhook(URL, Headers, TX, Event) of
-		ok ->
-			{noreply, State};
-		_ when length(State#state.retry) > 0 ->
-			Retry = State#state.retry ++ [{TX, Event, 1, os:system_time(second)}],
-			{noreply, State#state{retry = Retry}};
-		_ ->
-			?MODULE ! retry,
-			Retry = State#state.retry ++ [{TX, Event, 1, os:system_time(second)}],
-			{noreply, State#state{retry = Retry}}
-	end;
-
-handle_info(retry, State) when length(State#state.retry) == 0 ->
-	{norepy, State};
-
-handle_info(retry, State) ->
-	[{Entity, Event, Attempt, Time}, Rest] = State#state.retry,
-	?LOG_DEBUG("Web hook retry: (attempt ~p) ~p ~p", [Attempt, Event, Entity]),
-	CurrentTime = os:system_time(second),
-	case Attempt of
-		A when A > ?NUMBER_OF_TRIES ->
-			% exceeded. go further
-			?MODULE ! retry,
-			{noreply, State#state{retry = Rest}};
-		_A when Time + ?WAIT_BETWEEN_TRIES > CurrentTime ->
-			WaitTime = Time + ?WAIT_BETWEEN_TRIES - CurrentTime,
-			erlang:send_after(WaitTime * 1000, self(), retry),
-			{noreply, State};
-		A ->
-			URL = State#state.url,
-			Headers = State#state.headers,
-			case call_webhook(URL, Headers, Entity, Event) of
-				ok ->
-					% looks good. go further
-					?MODULE ! retry,
-					{noreply, State#state{retry = Rest}};
-				_ ->
-					% append to the end increasing the attempt counter
-					Retry = Rest + [{Entity, Event, A+1, os:system_time(second)}],
-					{noreply, State#state{retry = Retry}}
-
-
-
-			end
-	end;
+	call_webhook(URL, Headers, TX, Event),
+	{noreply, State};
 
 handle_info(Info, State) ->
 	?LOG_ERROR([{event, unhandled_info}, {module, ?MODULE}, {info, Info}]),
@@ -266,7 +213,8 @@ call_webhook(URL, Headers, Entity, Event) ->
 				{response, Error},
 				{retry_in, ?WAIT_BETWEEN_TRIES}
 			]),
-			error
+			timer:sleep(?WAIT_BETWEEN_TRIES),
+			call_webhook(URL, Headers, Entity, Event)
 	end.
 
 entity_id(#block { indep_hash = ID }) -> ar_util:encode(ID);

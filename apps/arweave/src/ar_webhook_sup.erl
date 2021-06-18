@@ -31,7 +31,7 @@ init([]) ->
         fun(Hook) when is_record(Hook, config_webhook) ->
             Handler = {ar_webhook, Hook#config_webhook.url},
             {Handler, {ar_webhook, start_link, [Hook]},
-                        permanent, 5000, worker, [ar_network_handler]};
+                        permanent, 5000, worker, [ar_webhook]};
 			(Hook) ->
 				?LOG_ERROR("Incorrect webhook format (must be 'config_webhook' record) ~p", [Hook])
         end, Config#config.webhooks

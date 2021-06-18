@@ -300,26 +300,8 @@ handle_info({event, tx, {new, TX, _FromPeerID}}, State) ->
 
 %% @doc Add the transaction to the mining pool, to be included in the mined block.
 handle_info({event, tx, {mine, TX}}, State) ->
-	[{mempool_size, MempoolSize}] = ets:lookup(node_state, mempool_size),
-	[{tx_statuses, Map}] = ets:lookup(node_state, tx_statuses),
-	case maps:get(TX#tx.id, Map, not_found) of
-		not_found ->
-			Map2 = maps:put(TX#tx.id, ready_for_mining, Map),
-			ets:insert(node_state, [
-				{{tx, TX#tx.id}, TX},
-				{tx_statuses, Map2},
-				{mempool_size, increase_mempool_size(MempoolSize, TX)}
-			]),
-			{noreply, State};
-		ready_for_mining ->
-			{noreply, State};
-		_ ->
-			Map2 = maps:put(TX#tx.id, ready_for_mining, Map),
-			ets:insert(node_state, [
-				{tx_statuses, Map2}
-			]),
-			{noreply, State}
-	end;
+	add_tx_to_mempool(TX, ready_for_mining),
+	{noreply, State};
 
 %% @doc Remove dropped transactions.
 handle_info({event, tx, {drop, DroppedTX, Reason}}, State) ->
@@ -903,8 +885,11 @@ return_orphaned_txs_to_mempool(H, H) ->
 return_orphaned_txs_to_mempool(H, BaseH) ->
 	#block{ txs = TXs, previous_block = PrevH } = ar_block_cache:get(block_cache, H),
 	lists:foreach(fun(TX) ->
-		% events aren't delivering to the sender, so spawn the process
-		spawn(fun() -> ar_events:send(tx, {mine, TX}) end)
+		% events aren't delivering to the sender, but we should let them know who subcribed
+		% to the 'tx' events.
+		ar_events:send(tx, {mine, TX}),
+		% move TX to the mempool explicitly
+		add_tx_to_mempool(TX, ready_for_mining)
 	end, TXs),
 	return_orphaned_txs_to_mempool(PrevH, BaseH).
 
@@ -1022,3 +1007,20 @@ dump_mempool(TXs, MempoolSize) ->
 		{error, Reason} ->
 			?LOG_ERROR([{event, failed_to_dump_mempool}, {reason, Reason}])
 	end.
+
+add_tx_to_mempool(#tx{ id = TXID } = TX, Status) ->
+	[{mempool_size, MempoolSize}] = ets:lookup(node_state, mempool_size),
+	[{tx_statuses, Map}] = ets:lookup(node_state, tx_statuses),
+	MempoolSize2 =
+		case maps:is_key(TXID, Map) of
+			false ->
+				increase_mempool_size(MempoolSize, TX);
+			true ->
+				MempoolSize
+		end,
+	ets:insert(node_state, [
+		{{tx, TX#tx.id}, TX},
+		{tx_statuses, maps:put(TX#tx.id, Status, Map)},
+		{mempool_size, MempoolSize2}
+	]),
+	ok.
