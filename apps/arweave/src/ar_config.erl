@@ -324,6 +324,27 @@ parse_options([{<<"max_disk_pool_data_root_buffer_mb">>, D} | Rest], Config) whe
 parse_options([{<<"randomx_bulk_hashing_iterations">>, D} | Rest], Config) when is_integer(D) ->
 	parse_options(Rest, Config#config{ randomx_bulk_hashing_iterations = D });
 
+parse_options([{<<"debug">>, B} | Rest], Config) when is_boolean(B) ->
+	parse_options(Rest, Config#config{ debug = B });
+
+parse_options([{<<"rating_rates">>, {RatesConfig}} | Rest], Config) when is_list(RatesConfig) ->
+	{_,T} = Config#config.wildfire,
+	case parse_rates(RatesConfig, #{}) of
+		{ok, Rates} ->
+			parse_options(Rest, Config#config{ wildfire = {Rates,T} });
+		Error ->
+			{error, bad_rates, Error}
+	end;
+
+parse_options([{<<"rating_triggers">>, {TriggersConfig}} | Rest], Config) when is_list(TriggersConfig) ->
+	{R,_} = Config#config.wildfire,
+	case parse_triggers(TriggersConfig, #{}) of
+		{ok, Triggers} ->
+			parse_options(Rest, Config#config{ wildfire = {R,Triggers} });
+		Error ->
+			{error, bad_triggers, Error}
+	end;
+
 parse_options([Opt | _], _) ->
 	{error, unknown, Opt};
 parse_options([], Config) ->
@@ -399,3 +420,201 @@ parse_semaphore({Unknown, _N}, ParsedSemaphores) ->
 		{semaphore, io_lib:format("~p", [Unknown])}
 	]),
 	ParsedSemaphores.
+
+parse_rates([], R) ->
+	?LOG_ERROR("RRRR ~p", [R]),
+	{ok, R};
+parse_rates([{<<"request_tx">>,N} |Rates], R) when is_number(N) ->
+	parse_rates(Rates, maps:put({request, tx}, N, R));
+parse_rates([{<<"request_block">>,N} |Rates], R) when is_number(N) ->
+	parse_rates(Rates, maps:put({request, block}, N, R));
+parse_rates([{<<"request_chunk">>,N} |Rates], R) when is_number(N) ->
+	parse_rates(Rates, maps:put({request, chunk}, N, R));
+parse_rates([{<<"push_tx">>,N} |Rates], R) when is_number(N) ->
+	parse_rates(Rates, maps:put({push, tx}, N, R));
+parse_rates([{<<"push_block">>,N} |Rates], R) when is_number(N) ->
+	parse_rates(Rates, maps:put({push, block}, N, R));
+parse_rates([{<<"response_tx">>,N} |Rates], R) when is_number(N) ->
+	parse_rates(Rates, maps:put({response, tx}, N, R));
+parse_rates([{<<"response_block">>,N} |Rates], R) when is_number(N) ->
+	parse_rates(Rates, maps:put({response, block}, N, R));
+parse_rates([{<<"response_chunk">>,N} |Rates], R) when is_number(N) ->
+	parse_rates(Rates, maps:put({response, chunk}, N, R));
+parse_rates([{<<"response">>,N} |Rates], R) when is_number(N) ->
+	parse_rates(Rates, maps:put({response, any}, N, R));
+parse_rates([{<<"request_malformed">>,N} |Rates], R) when is_number(N) ->
+	parse_rates(Rates, maps:put({request, malformed}, N, R));
+parse_rates([{<<"response_malformed">>,N} |Rates], R) when is_number(N) ->
+	parse_rates(Rates, maps:put({response, malformed}, N, R));
+parse_rates([{<<"response_connect_timeout">>,N} |Rates], R) when is_number(N) ->
+	parse_rates(Rates, maps:put({response, connect_timeout}, N, R));
+parse_rates([{<<"response_request_timeout">>,N} |Rates], R) when is_number(N) ->
+	parse_rates(Rates, maps:put({response, request_timeout}, N, R));
+parse_rates([{<<"response_not_found">>,N} |Rates], R) when is_number(N) ->
+	parse_rates(Rates, maps:put({response, not_found}, N, R));
+parse_rates([{<<"push_malformed">>,N} |Rates], R) when is_number(N) ->
+	parse_rates(Rates, maps:put({push, malformed}, N, R));
+parse_rates([{<<"attack">>,N} |Rates], R) when is_number(N) ->
+	parse_rates(Rates, maps:put({attack, any}, N, R));
+parse_rates([Unknown|Rates], R) ->
+	?LOG_ERROR("unknown rate option ~p", [Unknown]),
+	parse_rates(Rates, R).
+
+parse_triggers([], T) ->
+	?LOG_ERROR("TTTT ~p", [T]),
+	{ok, T};
+parse_triggers([{<<"request_tx">>,{Trigger}} |Triggers], T) when is_list(Trigger) ->
+	Opts = {undefined,undefined,undefined,undefined},
+	case parse_trigger(Trigger,Opts) of
+		{ok, {I,P,Tr,V}} ->
+			parse_triggers(Triggers, maps:put({request, tx}, {I,P,Tr,V}, T));
+		_ ->
+			error
+	end;
+parse_triggers([{<<"request_block">>,{Trigger}} |Triggers], T) when is_list(Trigger) ->
+	Opts = {undefined,undefined,undefined,undefined},
+	case parse_trigger(Trigger,Opts) of
+		{ok, {I,P,Tr,V}} ->
+			parse_triggers(Triggers, maps:put({request, block}, {I,P,Tr,V}, T));
+		_ ->
+			error
+	end;
+parse_triggers([{<<"request_chunk">>,{Trigger}} |Triggers], T) when is_list(Trigger) ->
+	Opts = {undefined,undefined,undefined,undefined},
+	case parse_trigger(Trigger,Opts) of
+		{ok, {I,P,Tr,V}} ->
+			parse_triggers(Triggers, maps:put({request, chunk}, {I,P,Tr,V}, T));
+		_ ->
+			error
+	end;
+parse_triggers([{<<"push_tx">>,{Trigger}} |Triggers], T) when is_list(Trigger) ->
+	Opts = {undefined,undefined,undefined,undefined},
+	case parse_trigger(Trigger,Opts) of
+		{ok, {I,P,Tr,V}} ->
+			parse_triggers(Triggers, maps:put({push, tx}, {I,P,Tr,V}, T));
+		_ ->
+			error
+	end;
+parse_triggers([{<<"push_block">>,{Trigger}} |Triggers], T) when is_list(Trigger) ->
+	Opts = {undefined,undefined,undefined,undefined},
+	case parse_trigger(Trigger,Opts) of
+		{ok, {I,P,Tr,V}} ->
+			parse_triggers(Triggers, maps:put({push, block}, {I,P,Tr,V}, T));
+		_ ->
+			error
+	end;
+parse_triggers([{<<"response_tx">>,{Trigger}} |Triggers], T) when is_list(Trigger) ->
+	Opts = {undefined,undefined,undefined,undefined},
+	case parse_trigger(Trigger,Opts) of
+		{ok, {I,P,Tr,V}} ->
+			parse_triggers(Triggers, maps:put({response, tx}, {I,P,Tr,V}, T));
+		_ ->
+			error
+	end;
+parse_triggers([{<<"response_block">>,{Trigger}} |Triggers], T) when is_list(Trigger) ->
+	Opts = {undefined,undefined,undefined,undefined},
+	case parse_trigger(Trigger,Opts) of
+		{ok, {I,P,Tr,V}} ->
+			parse_triggers(Triggers, maps:put({response, block}, {I,P,Tr,V}, T));
+		_ ->
+			error
+	end;
+parse_triggers([{<<"response_chunk">>,{Trigger}} |Triggers], T) when is_list(Trigger) ->
+	Opts = {undefined,undefined,undefined,undefined},
+	case parse_trigger(Trigger,Opts) of
+		{ok, {I,P,Tr,V}} ->
+			parse_triggers(Triggers, maps:put({response, chunk}, {I,P,Tr,V}, T));
+		_ ->
+			error
+	end;
+parse_triggers([{<<"response">>,{Trigger}} |Triggers], T) when is_list(Trigger) ->
+	Opts = {undefined,undefined,undefined,undefined},
+	case parse_trigger(Trigger,Opts) of
+		{ok, {I,P,Tr,V}} ->
+			parse_triggers(Triggers, maps:put({response, any}, {I,P,Tr,V}, T));
+		_ ->
+			error
+	end;
+parse_triggers([{<<"request_malformed">>,{Trigger}} |Triggers], T) when is_list(Trigger) ->
+	Opts = {undefined,undefined,undefined,undefined},
+	case parse_trigger(Trigger,Opts) of
+		{ok, {I,P,Tr,V}} ->
+			parse_triggers(Triggers, maps:put({request, malformed}, {I,P,Tr,V}, T));
+		_ ->
+			error
+	end;
+parse_triggers([{<<"response_malformed">>,{Trigger}} |Triggers], T) when is_list(Trigger) ->
+	Opts = {undefined,undefined,undefined,undefined},
+	case parse_trigger(Trigger,Opts) of
+		{ok, {I,P,Tr,V}} ->
+			parse_triggers(Triggers, maps:put({response, malformed}, {I,P,Tr,V}, T));
+		_ ->
+			error
+	end;
+parse_triggers([{<<"response_connect_timeout">>,{Trigger}} |Triggers], T) when is_list(Trigger) ->
+	Opts = {undefined,undefined,undefined,undefined},
+	case parse_trigger(Trigger,Opts) of
+		{ok, {I,P,Tr,V}} ->
+			parse_triggers(Triggers, maps:put({response, connect_timeout}, {I,P,Tr,V}, T));
+		_ ->
+			error
+	end;
+parse_triggers([{<<"response_request_timeout">>,{Trigger}} |Triggers], T) when is_list(Trigger) ->
+	Opts = {undefined,undefined,undefined,undefined},
+	case parse_trigger(Trigger,Opts) of
+		{ok, {I,P,Tr,V}} ->
+			parse_triggers(Triggers, maps:put({response, request_timeout}, {I,P,Tr,V}, T));
+		_ ->
+			error
+	end;
+parse_triggers([{<<"response_not_found">>,{Trigger}} |Triggers], T) when is_list(Trigger) ->
+	Opts = {undefined,undefined,undefined,undefined},
+	case parse_trigger(Trigger,Opts) of
+		{ok, {I,P,Tr,V}} ->
+			parse_triggers(Triggers, maps:put({response, not_found}, {I,P,Tr,V}, T));
+		_ ->
+			error
+	end;
+parse_triggers([{<<"push_malformed">>,{Trigger}} |Triggers], T) when is_list(Trigger) ->
+	Opts = {undefined,undefined,undefined,undefined},
+	case parse_trigger(Trigger,Opts) of
+		{ok, {I,P,Tr,V}} ->
+			parse_triggers(Triggers, maps:put({push, malformed}, {I,P,Tr,V}, T));
+		_ ->
+			error
+	end;
+parse_triggers([{<<"attack">>,{Trigger}} |Triggers], T) when is_list(Trigger) ->
+	Opts = {undefined,undefined,undefined,undefined},
+	case parse_trigger(Trigger,Opts) of
+		{ok, {I,P,Tr,V}} ->
+			parse_triggers(Triggers, maps:put({attack, any}, {I,P,Tr,V}, T));
+		_ ->
+			error
+	end;
+parse_triggers([Unknown|Triggers], T) ->
+	?LOG_ERROR("unknown trigger option ~p", [Unknown]),
+	parse_triggers(Triggers, T).
+
+parse_trigger([], {I,P,T,V}) when I == undefined; P == undefined; T == undefined; V == undefined ->
+	?LOG_ERROR("incorrect trigger options"),
+	error;
+parse_trigger([], Opts) ->
+	{ok, Opts};
+parse_trigger([{<<"intensity">>, I}|Options], {_,Period,Trigger,Value}) when is_number(I), I > 0 ->
+	parse_trigger(Options, {I, Period, Trigger, Value});
+parse_trigger([{<<"period">>, P}|Options], {Intensity,_,Trigger,Value}) when is_number(P), P >= 0 ->
+	parse_trigger(Options, {Intensity, P, Trigger, Value});
+parse_trigger([{<<"trigger">>, <<"bonus">>}|Options], {Intensity,Period,_,Value}) ->
+	parse_trigger(Options, {Intensity, Period, bonus, Value});
+parse_trigger([{<<"trigger">>, <<"ban">>}|Options], {Intensity,Period,_,Value}) ->
+	parse_trigger(Options, {Intensity, Period, ban, Value});
+parse_trigger([{<<"trigger">>, <<"penalty">>}|Options], {Intensity,Period,_,Value}) ->
+	parse_trigger(Options, {Intensity, Period, penalty, Value});
+parse_trigger([{<<"value">>, V}|Options], {Intensity,Period,Trigger,_}) when is_number(V), V > 0 ->
+	parse_trigger(Options, {Intensity, Period, Trigger, V});
+parse_trigger([Option|_],_) ->
+	?LOG_ERROR("incorrect trigger option: ~p", [Option]),
+	error.
+
+
+

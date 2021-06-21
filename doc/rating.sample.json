@@ -1,0 +1,47 @@
+{
+	"rating_rates": {
+		"request_tx": 10,
+		"request_block": 20,
+		"request_chunk": 30,
+		"push_tx": 1000,
+		"push_block": 2000,
+		"response_tx": 1000,
+		"response_block": 2000,
+		"response_chunk": 3000,
+		"response": 100,
+		"request_malformed": -1000,
+		"response_malformed": -10000,
+		"response_connect_timeout": -1,
+		"response_request_timeout": -1000,
+		"response_not_found": -500,
+		"push_malformed": -10000,
+		"attack": -10000
+	},
+	"rating_triggers": {
+		"push_block": {
+			"intensity": 30,
+			"period": 3600,
+			"trigger": "bonus",
+			"value": 500
+		},
+		"request_malformed": {
+			"intensity": 10,
+			"period": 3600,
+			"trigger": "ban",
+			"value": 60
+		},
+		"request_tx": {
+			"intensity": 60,
+			"period": 60,
+			"trigger": "penalty",
+			"value": 10
+		},
+		"attack": {
+			"intensity": 1,
+			"period": 0,
+			"trigger": "ban",
+			"value": 1440
+		}
+	}
+}
+
