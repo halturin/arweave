@@ -115,6 +115,7 @@
 		get_sync_record => ?MAX_PARALLEL_GET_SYNC_RECORD_REQUESTS
 	},
 	wildfire = {#{}, #{}},
+	disk_cache_size = ?DISK_CACHE_SIZE,
 	debug = false
 }).
 
