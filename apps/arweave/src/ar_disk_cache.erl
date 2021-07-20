@@ -8,8 +8,8 @@
 -behaviour(gen_server).
 
 -export([
-	get_block/1,
-	get_tx/1
+	lookup_block_filename/1,
+	lookup_tx_filename/1
 ]).
 
 -export([
@@ -42,10 +42,44 @@
 %%% API
 %%%===================================================================
 
-get_block(ID) ->
-	ID.
-get_tx(ID) ->
-	ID.
+lookup_block_filename(Hash) when is_binary(Hash)->
+	% use the process dictionary to keep the path
+	PathBlock = case get(ar_disk_cache_path) of
+		undefined ->
+			{ok, Config} = application:get_env(arweave, config),
+			Path = filename:join(Config#config.data_dir, ?CACHE_DIR),
+			put(ar_disk_cach_path, Path),
+			filename:join(Path, ?CACHE_BLOCK_DIR);
+		Path ->
+			filename:join(Path, ?CACHE_BLOCK_DIR)
+	end,
+	FileName = binary_to_list(Hash) ++ ".json",
+	File = filename:join(PathBlock, FileName),
+	case filelib:is_file(File) of
+		true ->
+			File;
+		_ ->
+			unavailable
+	end.
+
+lookup_tx_filename(Hash) when is_binary(Hash) ->
+	PathTX = case get(ar_disk_cache_path) of
+		undefined ->
+			{ok, Config} = application:get_env(arweave, config),
+			Path = filename:join(Config#config.data_dir, ?CACHE_DIR),
+			put(ar_disk_cach_path, Path),
+			filename:join(Path, ?CACHE_TX_DIR);
+		Path ->
+			filename:join(Path, ?CACHE_TX_DIR)
+	end,
+	FileName = binary_to_list(Hash) ++ ".json",
+	File = filename:join(PathTX, FileName),
+	case filelib:is_file(File) of
+		true ->
+			File;
+		_ ->
+			unavailable
+	end.
 
 %%--------------------------------------------------------------------
 %% @doc

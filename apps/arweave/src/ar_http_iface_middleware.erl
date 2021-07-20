@@ -1373,6 +1373,30 @@ block_field_to_string(<<"wallet_list">>, Res) -> ar_serialize:jsonify(Res);
 block_field_to_string(<<"reward_addr">>, Res) -> Res.
 
 hash_to_filename(Type, Hash) ->
+	case hash_to_filename_from_diskcache(Type, Hash) of
+		unavailable ->
+			hash_to_filename_from_storage(Type, Hash);
+		FileName ->
+			FileName
+	end.
+hash_to_filename_from_diskcache(tx, Hash) ->
+	case ar_util:safe_decode(Hash) of
+		{ok, ID} ->
+			ar_disk_cache:lookup_tx_filename(ID);
+		_ ->
+			unavailable
+	end;
+hash_to_filename_from_diskcache(block, Hash) ->
+	case ar_util:safe_decode(Hash) of
+		{ok, ID} ->
+			ar_disk_cache:lookup_block_filename(Hash);
+		_ ->
+			unavailable
+	end;
+hash_to_filename_from_diskcache(_,_) ->
+	unavailable.
+
+hash_to_filename_from_storage(Type, Hash) ->
 	case ar_util:safe_decode(Hash) of
 		{error, invalid} ->
 			{error, invalid};

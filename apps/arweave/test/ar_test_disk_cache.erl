@@ -13,6 +13,7 @@
 
 store_tx_block(Config) ->
 	logger:set_module_level(ar_disk_cache, debug),
+	logger:set_module_level(ar_http_iface_middleware, debug),
 	{ok, AppConfig} = application:get_env(arweave, config),
 	Limit = AppConfig#config.disk_cache_size * 1048576, % MB to Bytes
 	CleanSize = trunc(Limit * ?DISK_CACHE_CLEAN_PERCENT_MAX/100),
@@ -46,9 +47,9 @@ store_tx_block(Config) ->
 		% post it to the node and mine a new block
 		ar_test_lib:post_tx(TX),
 		ar_test_lib:mine(),
+		Block = ar_test_lib:wait_for_block(N),
 
 		% compute the block file size
-		Block = ar_test_lib:wait_for_block(N),
 		BlockData = ar_serialize:jsonify(ar_serialize:block_to_json_struct(Block)),
 		BlockFileName = Path ++ "/block/" ++ binary_to_list(ar_util:encode(Block#block.indep_hash)) ++ ".json",
 		Files2 = [{calendar:local_time(), byte_size(BlockData), BlockFileName} | Files1],
@@ -58,7 +59,8 @@ store_tx_block(Config) ->
 		case Size + Taken of
 			NewTaken when NewTaken > Limit ->
 				% make sure if disk cache cleaned up its space by adding a little sleep time
-				timer:sleep(300),
+				timer:sleep(500),
+				% compute disk case size
 				DiskCacheSize = filelib:fold_files(
 								  Path,
 								  ".*\\.json$",
@@ -68,7 +70,52 @@ store_tx_block(Config) ->
 				% compute the expecting size that the disk cache must take after the cleaning up.
 				{Files3, CleanedBytes} = delete_file(lists:sort(Files2), CleanSize),
 				NewTaken1 = NewTaken - (CleanSize - CleanedBytes),
-				DiskCacheSize = NewTaken1, % must be equal
+				% must be equal
+				DiskCacheSize = NewTaken1,
+				% check the disk cache
+				% case 1: non existing data. just removed. (via module)
+				[{_, _, RemovedPathFile} | _ ] = lists:sort(Files2),
+				RemovedFilename = filename:basename(RemovedPathFile, ".json"),
+				case filename:basename(filename:dirname(RemovedPathFile)) of
+					"tx" ->
+						% should be unavailable in cache
+						unavailable = ar_disk_cache:lookup_tx_filename(list_to_binary(RemovedFilename)),
+
+						% but should be presented in the storage...
+						% case 3: non existing data in the disk cache, but existing in the storage (via http)
+						{ok, {{<<"200">>, <<"OK">>}, _, _, _, _}} =
+							ar_http:req(#{
+								method => get,
+								peer => {127, 0, 0, 1, AppConfig#config.port},
+								path => "/tx/" ++ RemovedFilename % tx hash
+							});
+
+					 "block" ->
+						% should be unavailable in cache
+						unavailable = ar_disk_cache:lookup_block_filename(list_to_binary(RemovedFilename)),
+						% but should be presented in the storage
+						% case 3: ...
+						{ok, {{<<"200">>, <<"OK">>}, _, _, _, _}} =
+							ar_http:req(#{
+								method => get,
+								peer => {127, 0, 0, 1, AppConfig#config.port},
+								path => "/block/hash/" ++ RemovedFilename % tx hash
+							})
+				end,
+				% case 2: existing data (via module)
+				[{_, _, ExistingPathFile} | _ ] = lists:sort(Files3),
+				ExistingFilename = filename:basename(ExistingPathFile, ".json"),
+				case filename:basename(filename:dirname(ExistingPathFile)) of
+					"tx" ->
+						% should return the same full path and filename
+						ExistingPathFile = ar_disk_cache:lookup_tx_filename(list_to_binary(ExistingFilename));
+					 "block" ->
+						% should return the same full path and filename
+						ExistingPathFile = ar_disk_cache:lookup_block_filename(list_to_binary(ExistingFilename))
+				end,
+
+				% case 4: existing in the disk cache (via http)
+
 				{NewTaken1, Files3};
 			NewTaken ->
 				{NewTaken, Files2}
