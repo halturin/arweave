@@ -27,7 +27,8 @@
 	rating_check_rate_and_triggers/1,
 	rating_check_get_top_n_get_banned/1,
 	% ar_disk_cache.erl
-	disk_cache_store_tx_block/1
+	disk_cache_store_tx_block/1,
+	disk_cache_reset/1
 ]).
 
 %%%===================================================================
@@ -190,7 +191,8 @@ groups() ->
 			rating_peer_join_leave_rejoin,
 			rating_check_rate_and_triggers,
 			rating_check_get_top_n_get_banned,
-			disk_cache_store_tx_block
+			disk_cache_store_tx_block,
+			disk_cache_reset
         ]}
     ].
 
@@ -233,6 +235,7 @@ rating_peer_join_leave_rejoin(Config) -> ar_test_rating:peer_join_leave_rejoin(C
 rating_check_rate_and_triggers(Config) -> ar_test_rating:check_rate_and_triggers(Config).
 rating_check_get_top_n_get_banned(Config) -> ar_test_rating:check_get_top_n_get_banned(Config).
 disk_cache_store_tx_block(Config) -> ar_test_disk_cache:store_tx_block(Config).
+disk_cache_reset(Config) -> ar_test_disk_cache:reset_cache(Config).
 
 %%%===================================================================
 %%% Private functions.

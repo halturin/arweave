@@ -9,7 +9,8 @@
 
 -export([
 	lookup_block_filename/1,
-	lookup_tx_filename/1
+	lookup_tx_filename/1,
+	reset/0
 ]).
 
 -export([
@@ -31,7 +32,8 @@
 
 %% Internal state definition.
 -record(state, {
-	limit = ?DISK_CACHE_SIZE,
+	limit_max,
+	limit_min,
 	size = 0,
 	path,
 	block_path,
@@ -81,6 +83,8 @@ lookup_tx_filename(Hash) when is_binary(Hash) ->
 			unavailable
 	end.
 
+reset() ->
+	gen_server:call(?MODULE, reset).
 %%--------------------------------------------------------------------
 %% @doc
 %% Starts the server
@@ -116,8 +120,11 @@ init([]) ->
 	ok = filelib:ensure_dir(BlockPath ++ "/"),
 	ok = filelib:ensure_dir(TXPath ++ "/"),
 	Size = filelib:fold_files(Path, ".*\\.json$", true, fun(F,Acc) -> filelib:file_size(F)+Acc end, 0),
+	LimitMax = Config#config.disk_cache_size * 1048576, % MB to Bytes,
+	LimitMin = trunc(LimitMax * (100 - ?DISK_CACHE_CLEAN_PERCENT_MAX)/100),
 	State = #state{
-		limit = Config#config.disk_cache_size * 1048576, % MB to Bytes
+		limit_max = LimitMax,
+		limit_min = LimitMin,
 		size = Size,
 		path = Path,
 		block_path = BlockPath,
@@ -139,6 +146,16 @@ init([]) ->
 %%									 {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_call(reset, _From, State) ->
+	Path = State#state.path,
+	?LOG_DEBUG("reset disk cache: ~p", [Path]),
+	os:cmd("rm -r " ++ Path ++ "/*"),
+	BlockPath = filename:join(Path, ?CACHE_BLOCK_DIR),
+	TXPath = filename:join(Path, ?CACHE_TX_DIR),
+	ok = filelib:ensure_dir(BlockPath ++ "/"),
+	ok = filelib:ensure_dir(TXPath ++ "/"),
+	{reply, ok, State#state{size = 0}};
+
 handle_call(Request, _From, State) ->
 	?LOG_ERROR([{event, unhandled_call}, {request, Request}]),
 	{reply, ok, State}.
@@ -153,18 +170,18 @@ handle_call(Request, _From, State) ->
 %%									{stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_cast(check_clean, State) when State#state.size > State#state.limit ->
-	?LOG_DEBUG("Exceed the limit (~p): ~p", [State#state.limit, State#state.size]),
-	Files = lists:sort(
-	  filelib:fold_files(
+handle_cast(check_clean, State) when State#state.size > State#state.limit_max ->
+	?LOG_DEBUG("Exceed the limit (~p): ~p", [State#state.limit_max, State#state.size]),
+	Files = lists:sort(filelib:fold_files(
 		State#state.path,
 		".*\\.json$",
 		true,
-		fun(F,Acc) -> [{filelib:last_modified(F), filelib:file_size(F), F}|Acc] end,
-		[])
-	),
+		fun(F,A) ->
+			 [{filelib:last_modified(F), filelib:file_size(F), F}|A]
+		end,
+		[])),
 	% how much space should be cleaned up.
-	CleanSize = trunc(State#state.limit * ?DISK_CACHE_CLEAN_PERCENT_MAX/100),
+	CleanSize = State#state.size - State#state.limit_min,
 	X = delete_file(Files, CleanSize),
 	Size = State#state.size - (CleanSize-X),
 	?LOG_DEBUG("Cleaned space ~p bytes. Current size: ~p", [ CleanSize - X, Size ]),
@@ -196,7 +213,7 @@ handle_info({event, block, {new, Block, _FromPeerID}}, State) ->
 	Size = State#state.size + byte_size(Data),
 	case file:write_file(File, Data) of
 		ok ->
-			?LOG_DEBUG("Added block to cache. file ~p", [Name]),
+			?LOG_DEBUG("Added block to cache. file (~p bytes) ~p. Cache size: ~p", [byte_size(Data), Name, Size]),
 			gen_server:cast(?MODULE, check_clean),
 			{noreply, State#state{size = Size}};
 		{error, Reason} ->
@@ -216,7 +233,7 @@ handle_info({event, tx, {new, TX, _FromPeerID}}, State) ->
 	Size = State#state.size + byte_size(Data),
 	case file:write_file(File, Data) of
 		ok ->
-			?LOG_DEBUG("Added tx to cache. file ~p", [Name]),
+			?LOG_DEBUG("Added tx to cache. file (~p bytes) ~p. Cache size: ~p", [byte_size(Data), Name, Size]),
 			gen_server:cast(?MODULE, check_clean),
 			{noreply, State#state{size = Size}};
 		{error, Reason} ->
