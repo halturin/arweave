@@ -172,32 +172,12 @@ handle_cast(check_space_alarm, State) ->
 	{noreply, State};
 
 handle_cast(check_space, State) ->
+	cast_after(ar_disksup:get_disk_space_check_frequency(), check_space),
 	case have_free_space() of
 		true ->
-			cast_after(ar_disksup:get_disk_space_check_frequency(), check_space),
 			{noreply, State#{ sync_disk_space => true }};
 		false ->
-			case should_cleanup() of
-				true ->
-					?LOG_INFO([
-						{event, ar_header_sync_removing_oldest_headers},
-						{reason, little_disk_space_left}
-					]),
-					gen_server:cast(?MODULE, cleanup_oldest);
-				false ->
-					cast_after(ar_disksup:get_disk_space_check_frequency(), check_space)
-			end,
 			{noreply, State#{ sync_disk_space => false }}
-	end;
-
-handle_cast(cleanup_oldest, State) ->
-	case have_free_space() of
-		true ->
-			cast_after(ar_disksup:get_disk_space_check_frequency(), check_space),
-			{noreply, State#{ sync_disk_space => true }};
-		false ->
-			gen_server:cast(?MODULE, cleanup_oldest),
-			{noreply, remove_oldest_headers(State)}
 	end;
 
 handle_cast(process_item, #{ sync_disk_space := false } = State) ->
@@ -347,35 +327,6 @@ have_free_space() ->
 		%% RocksDB and the chunk storage contain v1 data, which is part of the headers.
 		andalso ar_storage:get_free_space(?ROCKS_DB_DIR) > ?DISK_HEADERS_BUFFER_SIZE
 			andalso ar_storage:get_free_space(?CHUNK_DIR) > ?DISK_HEADERS_BUFFER_SIZE.
-
-should_cleanup() ->
-	ar_storage:get_free_space(".") < ?DISK_HEADERS_CLEANUP_THRESHOLD
-		%% RocksDB and the chunk storage contain v1 data, which is part of the headers.
-		orelse ar_storage:get_free_space(?ROCKS_DB_DIR) < ?DISK_HEADERS_CLEANUP_THRESHOLD
-			orelse ar_storage:get_free_space(?CHUNK_DIR) < ?DISK_HEADERS_CLEANUP_THRESHOLD.
-
-remove_oldest_headers(#{ db := DB, sync_record := SyncRecord } = State) ->
-	case ar_intervals:count(SyncRecord) == 0 of
-		true ->
-			State;
-		false ->
-			{{_, Height}, _} = ar_intervals:take_smallest(SyncRecord),
-			Height2 = Height + 1,
-			case ar_kv:get(DB, << Height2:256 >>) of
-				not_found ->
-					State#{
-						sync_record => ar_intervals:delete(SyncRecord, Height2, Height2 - 1)
-					};
-				{ok, Value} ->
-					BH = element(1, binary_to_term(Value)),
-					SyncRecord2 = ar_intervals:delete(SyncRecord, Height2, Height2 - 1),
-					State2 = State#{ sync_record => SyncRecord2 },
-					ok = store_sync_state(State2),
-					{ok, _BytesRemoved} = ar_storage:delete_full_block(BH),
-					ok = ar_kv:delete(DB, << Height2:256 >>),
-					State2
-			end
-	end.
 
 cast_after(Delay, Message) ->
 	%% Not using timer:apply_after here because send_after is more efficient:

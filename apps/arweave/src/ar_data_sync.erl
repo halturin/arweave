@@ -356,6 +356,8 @@ handle_cast({add_tip_block, _Height, BlockTXPairs, BI}, State) ->
 	},
 	{noreply, store_sync_state(State2)};
 
+handle_cast({add_data_root_to_disk_pool, _}, #sync_data_state{ sync_disk_space = false } = State) ->
+	{noreply, State};
 handle_cast({add_data_root_to_disk_pool, {DataRoot, TXSize, TXID}}, State) ->
 	#sync_data_state{ disk_pool_data_roots = DiskPoolDataRoots } = State,
 	Key = << DataRoot/binary, TXSize:?OFFSET_KEY_BITSIZE >>,
@@ -745,7 +747,7 @@ handle_cast({store_fetched_chunk, Peer, Byte, RightBound, Proof, SubIntervals, L
 			end
 	end;
 
-handle_cast(process_disk_pool_item, #sync_data_state{ disk_full = true } = State) ->
+handle_cast(process_disk_pool_item, #sync_data_state{ sync_disk_space = false } = State) ->
 	cast_after(?DISK_POOL_SCAN_FREQUENCY_MS, process_disk_pool_item),
 	{noreply, State};
 handle_cast(process_disk_pool_item, State) ->
@@ -1316,7 +1318,7 @@ data_root_offset_index_from_reversed_block_index(
 			Error
 	end;
 data_root_offset_index_from_reversed_block_index(_Index, [], _StartOffset) ->
-	ok.	
+	ok.
 
 remove_orphaned_data(State, BlockStartOffset, WeaveSize) ->
 	ok = remove_orphaned_txs(State, BlockStartOffset, WeaveSize),
@@ -1398,7 +1400,7 @@ remove_orphaned_data_roots(State, BlockStartOffset) ->
 				end,
 				{ok, sets:new()},
 				Map
-			);	
+			);
 		Error ->
 			Error
 	end.

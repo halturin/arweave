@@ -127,7 +127,7 @@ check_cache(Taken, LimitMax, LimitMin, Files) when Taken > LimitMax ->
 				ar_http:req(#{
 					method => get,
 					peer => {127, 0, 0, 1, AppConfig#config.port},
-					path => "/block/hash/" ++ RemovedFilename % tx hash
+					path => "/block/hash/" ++ RemovedFilename % block hash
 				})
 	end,
 	% case 2: existing data (via module)
@@ -149,5 +149,5 @@ delete_file([], CleanSize) ->
 	{[], CleanSize};
 delete_file(Files, CleanSize) when CleanSize < 0 ->
 	{Files, CleanSize};
-delete_file([{DateTime, Size, FileName} | Files], CleanSize) ->
+delete_file([{_DateTime, Size, _FileName} | Files], CleanSize) ->
 	delete_file(Files, CleanSize - Size).
